@@ -153,6 +153,46 @@ async def post_message(
     return RedirectResponse(url=f"/session/{session_id}", status_code=303)
 
 
+@app.post("/session/{session_id}/queue")
+async def queue_message(
+    session_id: str,
+    message: Annotated[str, Form()],
+):
+    """Queue a message to be sent when the agent is ready."""
+    from augment_agent_dashboard.models import SessionMessage
+
+    store = get_store()
+    session = store.get_session(session_id)
+
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if not message.strip():
+        return RedirectResponse(url=f"/session/{session_id}", status_code=303)
+
+    # Add as a queued message
+    queued_msg = SessionMessage(role="queued", content=message.strip())
+    store.add_message(session_id, queued_msg)
+
+    return RedirectResponse(url=f"/session/{session_id}", status_code=303)
+
+
+@app.post("/session/{session_id}/queue/clear")
+async def clear_queue(session_id: str):
+    """Clear all queued messages for a session."""
+    store = get_store()
+    session = store.get_session(session_id)
+
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Remove all queued messages
+    session.messages = [m for m in session.messages if m.role != "queued"]
+    store.upsert_session(session)
+
+    return RedirectResponse(url=f"/session/{session_id}", status_code=303)
+
+
 @app.post("/session/{session_id}/delete")
 async def delete_session(session_id: str):
     """Delete a session from the dashboard."""
@@ -760,6 +800,20 @@ def get_base_styles(dark_mode: str | None) -> str:
         .btn-pause {{ background: #fbbf24; color: #000; }}
         .btn-reset {{ background: var(--text-secondary); color: #fff; }}
         .btn-delete {{ background: #dc2626; color: white; }}
+        .btn-queue {{ background: #8b5cf6; color: white; }}
+        .message.queued {{
+            border-left: 3px solid #8b5cf6;
+            background: linear-gradient(90deg, rgba(139, 92, 246, 0.1) 0%, transparent 100%);
+            opacity: 0.85;
+        }}
+        .message.queued .message-header {{
+            color: #8b5cf6;
+        }}
+        .queue-actions {{
+            display: flex;
+            gap: 8px;
+            margin-top: 8px;
+        }}
         .nav-links {{
             display: flex;
             gap: 8px;
@@ -1231,27 +1285,34 @@ def _format_elapsed_time(started_at: datetime | None) -> str:
 
 
 def _render_message_form(session) -> str:
-    """Render the message form, disabled if agent is busy."""
+    """Render the message form with queue support."""
     from augment_agent_dashboard.models import SessionStatus
+
+    # Count queued messages
+    queued_count = sum(1 for m in session.messages if m.role == "queued")
+    queue_info = f'<span style="color:var(--text-secondary);font-size:0.9em;">({queued_count} queued)</span>' if queued_count > 0 else ""
 
     if session.status == SessionStatus.ACTIVE:
         return f'''
             <div style="background:var(--status-active);color:#000;padding:12px;border-radius:8px;margin-bottom:10px;">
-                ⏳ Agent is currently working. Wait for it to finish before sending a new message.
+                ⏳ Agent is currently working. Messages will be queued and sent when ready. {queue_info}
             </div>
-            <form method="POST" action="/session/{session.session_id}/message">
-                <textarea id="message-input" name="message" placeholder="Agent is busy..." disabled style="opacity:0.5;"></textarea>
-                <button type="submit" disabled style="opacity:0.5;cursor:not-allowed;">Send Message</button>
+            <form method="POST" action="/session/{session.session_id}/queue">
+                <textarea id="message-input" name="message" placeholder="Type a message to queue..."></textarea>
+                <button type="submit" class="btn-queue">🕐 Enqueue Message</button>
             </form>
         '''
     else:
         return f'''
             <p style="color: var(--text-secondary); margin-bottom: 10px;">
-                This will spawn a new auggie process to handle your message in this session.
+                Send a message directly, or queue it for later. {queue_info}
             </p>
-            <form method="POST" action="/session/{session.session_id}/message">
+            <form method="POST" action="/session/{session.session_id}/message" style="margin-bottom:10px;">
                 <textarea id="message-input" name="message" placeholder="Type a message for the agent..."></textarea>
-                <button type="submit">Send Message</button>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                    <button type="submit">▶ Send Now</button>
+                    <button type="submit" formaction="/session/{session.session_id}/queue" class="btn-queue">🕐 Enqueue</button>
+                </div>
             </form>
         '''
 
@@ -1303,17 +1364,23 @@ def render_session_detail(session, dark_mode: str | None, loop_prompts: dict[str
 
     # Render message history
     messages_html = ""
+    queued_count = 0
     if not session.messages:
         messages_html = '<div class="empty-state">No messages in this session yet.</div>'
     else:
         for msg in session.messages:
             role_class = msg.role
-            role_label = msg.role.capitalize()
             time_str = msg.timestamp.strftime("%H:%M:%S") if msg.timestamp else ""
-            # Render markdown for assistant messages, escape HTML for user messages
-            if msg.role == "assistant":
+
+            if msg.role == "queued":
+                queued_count += 1
+                role_label = f"🕐 Queued #{queued_count}"
+                content_html = f"<p>{html.escape(msg.content)}</p>"
+            elif msg.role == "assistant":
+                role_label = "Assistant"
                 content_html = render_markdown(msg.content)
             else:
+                role_label = msg.role.capitalize()
                 content_html = f"<p>{html.escape(msg.content)}</p>"
 
             messages_html += f"""
@@ -1322,6 +1389,18 @@ def render_session_detail(session, dark_mode: str | None, loop_prompts: dict[str
                 <div class="message-content">{content_html}</div>
             </div>
             """
+
+    # Add clear queue button if there are queued messages
+    if queued_count > 0:
+        messages_html += f'''
+        <div class="queue-actions">
+            <form method="POST" action="/session/{session.session_id}/queue/clear">
+                <button type="submit" class="btn-delete" style="font-size:0.85em;" onclick="return confirm('Clear all {queued_count} queued messages?')">
+                    🗑 Clear Queue ({queued_count})
+                </button>
+            </form>
+        </div>
+        '''
 
     status_class = f"status-{session.status.value}"
     time_ago = format_time_ago(session.last_activity)

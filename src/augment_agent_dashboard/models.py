@@ -18,7 +18,7 @@ class SessionStatus(str, Enum):
 class SessionMessage:
     """A message in a session conversation."""
 
-    role: Literal["user", "assistant", "system", "dashboard"]
+    role: Literal["user", "assistant", "system", "dashboard", "queued"]
     content: str
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     message_id: str | None = None

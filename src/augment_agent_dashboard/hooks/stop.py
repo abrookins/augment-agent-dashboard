@@ -251,6 +251,21 @@ def run_hook() -> None:
                     port=config.get("port", 9000),
                     sound=config.get("notification_sound", True),
                 )
+        elif session:
+            # Check for queued messages (only if loop is not active)
+            queued_messages = [m for m in session.messages if m.role == "queued"]
+            if queued_messages:
+                # Get the first queued message
+                next_msg = queued_messages[0]
+                sys.stderr.write(f"Processing queued message: {next_msg.content[:50]}...\n")
+
+                # Convert queued message to user message
+                from augment_agent_dashboard.models import SessionMessage
+                next_msg.role = "user"
+                store.upsert_session(session)
+
+                # Spawn auggie with the queued message
+                spawn_loop_message(conversation_id, workspace_root, next_msg.content)
 
     except Exception as e:
         sys.stderr.write(f"Dashboard store error: {e}\n")
