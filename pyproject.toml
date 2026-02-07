@@ -1,0 +1,46 @@
+[project]
+name = "augment-agent-dashboard"
+version = "0.1.0"
+description = "Web dashboard for monitoring Augment coding agents"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.109.0",
+    "markdown>=3.10.1",
+    "psutil>=7.2.2",
+    "uvicorn[standard]>=0.27.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+    "httpx>=0.27",
+    "python-multipart>=0.0.22",
+]
+
+[project.scripts]
+augment-dashboard = "augment_agent_dashboard.server:main"
+augment-dashboard-install = "augment_agent_dashboard.install:main"
+augment-dashboard-session-start = "augment_agent_dashboard.hooks.session_start:main"
+augment-dashboard-stop = "augment_agent_dashboard.hooks.stop:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/augment_agent_dashboard"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
