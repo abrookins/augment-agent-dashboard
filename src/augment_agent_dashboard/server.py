@@ -228,6 +228,104 @@ async def reset_loop(session_id: str):
     return RedirectResponse(url=f"/session/{session_id}", status_code=303)
 
 
+@app.get("/config", response_class=HTMLResponse)
+async def config_page(request: Request):
+    """Configuration page for loop prompts."""
+    dark_mode = request.query_params.get("dark", None)
+    loop_prompts = _get_loop_prompts()
+    config = _get_full_config()
+    html = render_config_page(dark_mode, loop_prompts, config)
+    return HTMLResponse(content=html)
+
+
+@app.post("/config/prompts/add")
+async def add_prompt(name: Annotated[str, Form()], prompt: Annotated[str, Form()]):
+    """Add a new loop prompt."""
+    config = _get_full_config()
+    loop_prompts = config.get("loop_prompts", DEFAULT_LOOP_PROMPTS.copy())
+    loop_prompts[name] = prompt
+    config["loop_prompts"] = loop_prompts
+    _save_full_config(config)
+    return RedirectResponse(url="/config", status_code=303)
+
+
+@app.post("/config/prompts/delete")
+async def delete_prompt(name: Annotated[str, Form()]):
+    """Delete a loop prompt."""
+    config = _get_full_config()
+    loop_prompts = config.get("loop_prompts", DEFAULT_LOOP_PROMPTS.copy())
+    if name in loop_prompts:
+        del loop_prompts[name]
+    config["loop_prompts"] = loop_prompts
+    _save_full_config(config)
+    return RedirectResponse(url="/config", status_code=303)
+
+
+@app.post("/config/prompts/edit")
+async def edit_prompt(name: Annotated[str, Form()], prompt: Annotated[str, Form()]):
+    """Edit an existing loop prompt."""
+    config = _get_full_config()
+    loop_prompts = config.get("loop_prompts", DEFAULT_LOOP_PROMPTS.copy())
+    loop_prompts[name] = prompt
+    config["loop_prompts"] = loop_prompts
+    _save_full_config(config)
+    return RedirectResponse(url="/config", status_code=303)
+
+
+def _get_full_config() -> dict:
+    """Get full config from file."""
+    import json
+    config_path = Path.home() / ".augment" / "dashboard" / "config.json"
+    if config_path.exists():
+        try:
+            return json.loads(config_path.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def _save_full_config(config: dict) -> None:
+    """Save full config to file."""
+    import json
+    config_dir = Path.home() / ".augment" / "dashboard"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.json"
+    config_path.write_text(json.dumps(config, indent=2))
+
+
+# Browser notification support - stores pending notifications for polling
+_pending_notifications: list[dict] = []
+
+
+@app.post("/api/notifications/send")
+async def send_browser_notification(
+    title: Annotated[str, Form()],
+    body: Annotated[str, Form()],
+    url: Annotated[str, Form()] = "",
+):
+    """Queue a browser notification for connected clients."""
+    notification = {
+        "id": datetime.now(timezone.utc).isoformat(),
+        "title": title,
+        "body": body,
+        "url": url,
+    }
+    _pending_notifications.append(notification)
+    # Keep only last 50 notifications
+    while len(_pending_notifications) > 50:
+        _pending_notifications.pop(0)
+    return {"status": "queued"}
+
+
+@app.get("/api/notifications/poll")
+async def poll_notifications(since: str = ""):
+    """Poll for new notifications since a given timestamp."""
+    if not since:
+        return {"notifications": []}
+    notifications = [n for n in _pending_notifications if n["id"] > since]
+    return {"notifications": notifications}
+
+
 # HTML rendering functions (inline for simplicity)
 def get_base_styles(dark_mode: str | None) -> str:
     """Get CSS styles with dark/light mode support."""
@@ -495,6 +593,91 @@ def get_base_styles(dark_mode: str | None) -> str:
             font-size: 0.85em;
             word-break: break-all;
         }}
+        .loop-controls {{
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            align-items: center;
+            margin-top: 8px;
+        }}
+        .loop-controls form {{
+            display: inline-flex;
+            gap: 4px;
+            align-items: center;
+        }}
+        .loop-controls select {{
+            padding: 8px;
+            border-radius: 4px;
+            border: 1px solid var(--border-color);
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            font-size: 14px;
+            max-width: 150px;
+        }}
+        .loop-controls button {{
+            padding: 8px 12px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            white-space: nowrap;
+        }}
+        .btn-enable {{ background: var(--status-active); color: #000; }}
+        .btn-pause {{ background: #fbbf24; color: #000; }}
+        .btn-reset {{ background: var(--text-secondary); color: #fff; }}
+        .btn-delete {{ background: #dc2626; color: white; }}
+        .nav-links {{
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            align-items: center;
+        }}
+        .nav-links a {{
+            padding: 6px 10px;
+            background: var(--bg-secondary);
+            border-radius: 4px;
+            font-size: 0.85em;
+        }}
+
+        /* Mobile-first: stack everything vertically */
+        @media (max-width: 599px) {{
+            .header h1 {{ font-size: 1.2em; }}
+            .session-card {{
+                grid-template-columns: 1fr;
+                gap: 8px;
+            }}
+            .status-dot {{
+                position: absolute;
+                top: 12px;
+                right: 12px;
+            }}
+            .session-card {{
+                position: relative;
+            }}
+            .message-content table {{
+                display: block;
+                overflow-x: auto;
+                white-space: nowrap;
+                font-size: 0.8em;
+            }}
+            .message-content th, .message-content td {{
+                padding: 6px 8px;
+            }}
+            .loop-controls {{
+                flex-direction: column;
+                align-items: stretch;
+            }}
+            .loop-controls form {{
+                width: 100%;
+            }}
+            .loop-controls select {{
+                flex: 1;
+                max-width: none;
+            }}
+            .loop-controls button {{
+                flex-shrink: 0;
+            }}
+        }}
 
         /* Tablet and up */
         @media (min-width: 600px) {{
@@ -524,6 +707,85 @@ def get_base_styles(dark_mode: str | None) -> str:
     </style>
     """
 
+
+def _get_notification_script() -> str:
+    """Get JavaScript for browser notifications."""
+    return """
+        // Browser notification support
+        const banner = document.getElementById('notification-banner');
+        const bannerText = document.getElementById('notification-text');
+        let lastNotificationId = new Date().toISOString();
+
+        function checkNotificationSupport() {
+            return 'Notification' in window;
+        }
+
+        function updateBanner() {
+            if (!checkNotificationSupport()) {
+                banner.style.display = 'none';
+                return;
+            }
+
+            if (Notification.permission === 'default') {
+                banner.style.display = 'block';
+                bannerText.textContent = 'Click to enable browser notifications for agent alerts';
+                banner.onclick = requestPermission;
+            } else if (Notification.permission === 'granted') {
+                banner.style.display = 'block';
+                banner.style.background = 'var(--status-active)';
+                banner.style.color = '#000';
+                bannerText.textContent = '✓ Browser notifications enabled';
+                banner.onclick = null;
+                banner.style.cursor = 'default';
+                // Start polling for notifications
+                pollNotifications();
+            } else {
+                banner.style.display = 'block';
+                banner.style.background = 'var(--text-secondary)';
+                bannerText.textContent = 'Notifications blocked - enable in browser settings';
+                banner.onclick = null;
+            }
+        }
+
+        async function requestPermission() {
+            const permission = await Notification.requestPermission();
+            updateBanner();
+        }
+
+        async function pollNotifications() {
+            try {
+                const response = await fetch('/api/notifications/poll?since=' + encodeURIComponent(lastNotificationId));
+                const data = await response.json();
+                for (const n of data.notifications) {
+                    showNotification(n);
+                    lastNotificationId = n.id;
+                }
+            } catch (e) {
+                console.error('Notification poll error:', e);
+            }
+            // Poll every 3 seconds
+            setTimeout(pollNotifications, 3000);
+        }
+
+        function showNotification(n) {
+            if (Notification.permission !== 'granted') return;
+            const notification = new Notification(n.title, {
+                body: n.body,
+                icon: '🤖',
+                tag: n.id,
+                requireInteraction: true
+            });
+            if (n.url) {
+                notification.onclick = () => {
+                    window.focus();
+                    window.location.href = n.url;
+                };
+            }
+        }
+
+        // Initialize
+        updateBanner();
+    """
 
 
 def format_time_ago(dt: datetime) -> str:
@@ -598,22 +860,140 @@ def render_dashboard(sessions: list, dark_mode: str | None, sort_by: str = "rece
     <body>
         <div class="header">
             <h1>🤖 Augment Agent Dashboard</h1>
-            <div>
-                Sort: <a href="?sort=recent{dark_param}" style="{recent_active}">Recent</a> |
+            <div class="nav-links">
+                <a href="?sort=recent{dark_param}" style="{recent_active}">Recent</a>
                 <a href="?sort=name{dark_param}" style="{name_active}">Name</a>
-                &nbsp;|&nbsp;
-                <a href="?dark=true&sort={sort_by}">Dark</a> |
-                <a href="?dark=false&sort={sort_by}">Light</a> |
-                <a href="?sort={sort_by}">Auto</a>
+                <a href="?dark=true&sort={sort_by}">🌙</a>
+                <a href="?dark=false&sort={sort_by}">☀️</a>
+                <a href="/config">⚙️ Config</a>
             </div>
+        </div>
+        <div id="notification-banner" style="display:none;background:var(--accent);color:white;padding:10px 15px;border-radius:8px;margin-bottom:15px;cursor:pointer;">
+            🔔 <span id="notification-text">Enable browser notifications to get alerts on your phone</span>
         </div>
         <div class="session-list">
             {session_cards}
         </div>
         <script>
+            {_get_notification_script()}
             // Auto-refresh every 10 seconds
             setTimeout(() => location.reload(), 10000);
         </script>
+    </body>
+    </html>
+    """
+
+
+def render_config_page(dark_mode: str | None, loop_prompts: dict[str, str], config: dict) -> str:
+    """Render the configuration page HTML."""
+    styles = get_base_styles(dark_mode)
+
+    # Build prompt list
+    prompts_html = ""
+    for name, prompt in loop_prompts.items():
+        escaped_name = html.escape(name)
+        escaped_prompt = html.escape(prompt)
+        prompts_html += f'''
+        <div class="prompt-card">
+            <div class="prompt-header">
+                <strong>{escaped_name}</strong>
+                <form method="POST" action="/config/prompts/delete" style="display:inline;">
+                    <input type="hidden" name="name" value="{escaped_name}">
+                    <button type="submit" onclick="return confirm('Delete this prompt?')" class="btn-delete" style="padding:4px 8px;font-size:0.8em;">🗑</button>
+                </form>
+            </div>
+            <form method="POST" action="/config/prompts/edit" class="prompt-edit-form">
+                <input type="hidden" name="name" value="{escaped_name}">
+                <textarea name="prompt" rows="3">{escaped_prompt}</textarea>
+                <button type="submit" class="btn-enable" style="margin-top:8px;">Save</button>
+            </form>
+        </div>
+        '''
+
+    return f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Configuration - Augment Dashboard</title>
+        {styles}
+        <style>
+            .prompt-card {{
+                background: var(--bg-secondary);
+                border: 1px solid var(--border-color);
+                border-radius: 8px;
+                padding: 12px;
+                margin-bottom: 12px;
+            }}
+            .prompt-header {{
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 8px;
+            }}
+            .prompt-edit-form textarea {{
+                width: 100%;
+                padding: 8px;
+                border: 1px solid var(--border-color);
+                border-radius: 4px;
+                background: var(--bg-primary);
+                color: var(--text-primary);
+                font-family: inherit;
+                font-size: 14px;
+                resize: vertical;
+            }}
+            .add-prompt-form {{
+                background: var(--bg-secondary);
+                border: 1px solid var(--border-color);
+                border-radius: 8px;
+                padding: 15px;
+                margin-top: 20px;
+            }}
+            .add-prompt-form input[type="text"] {{
+                width: 100%;
+                padding: 10px;
+                border: 1px solid var(--border-color);
+                border-radius: 4px;
+                background: var(--bg-primary);
+                color: var(--text-primary);
+                font-size: 14px;
+                margin-bottom: 10px;
+            }}
+            .add-prompt-form textarea {{
+                width: 100%;
+                padding: 10px;
+                border: 1px solid var(--border-color);
+                border-radius: 4px;
+                background: var(--bg-primary);
+                color: var(--text-primary);
+                font-family: inherit;
+                font-size: 14px;
+                resize: vertical;
+                min-height: 80px;
+                margin-bottom: 10px;
+            }}
+        </style>
+    </head>
+    <body>
+        <a href="/" class="back-link">← Back to Dashboard</a>
+        <h1>⚙️ Configuration</h1>
+
+        <h2>Loop Prompts</h2>
+        <p style="color:var(--text-secondary);margin-bottom:15px;">
+            These prompts are used for the quality loop feature. Select one when enabling a loop on a session.
+        </p>
+
+        {prompts_html}
+
+        <div class="add-prompt-form">
+            <h3>Add New Prompt</h3>
+            <form method="POST" action="/config/prompts/add">
+                <input type="text" name="name" placeholder="Prompt name (e.g., 'Security Review')" required>
+                <textarea name="prompt" placeholder="Enter the prompt text..." required></textarea>
+                <button type="submit" class="btn-enable" style="width:100%;">Add Prompt</button>
+            </form>
+        </div>
     </body>
     </html>
     """
@@ -644,22 +1024,20 @@ def _render_loop_controls(session, loop_prompts: dict[str, str]) -> str:
         elapsed = _format_elapsed_time(session.loop_started_at)
         prompt_name = session.loop_prompt_name or "Unknown"
         return f'''
-            <span style="color:var(--status-active);font-weight:bold;">
-                🔄 Loop Active: {html.escape(prompt_name)}
-            </span>
-            <span style="color:var(--text-secondary);">
-                ({session.loop_count} iterations, {elapsed})
-            </span>
-            <form method="POST" action="/session/{session.session_id}/loop/pause" style="display:inline;">
-                <button type="submit" style="background:#fbbf24;color:#000;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:0.85em;">
-                    ⏸ Pause
-                </button>
-            </form>
-            <form method="POST" action="/session/{session.session_id}/loop/reset" style="display:inline;">
-                <button type="submit" style="background:var(--text-secondary);color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:0.85em;">
-                    ↺ Reset
-                </button>
-            </form>
+            <div class="loop-controls">
+                <span style="color:var(--status-active);font-weight:bold;">
+                    🔄 {html.escape(prompt_name)}
+                </span>
+                <span style="color:var(--text-secondary);">
+                    {session.loop_count} iterations, {elapsed}
+                </span>
+                <form method="POST" action="/session/{session.session_id}/loop/pause">
+                    <button type="submit" class="btn-pause">⏸ Pause</button>
+                </form>
+                <form method="POST" action="/session/{session.session_id}/loop/reset">
+                    <button type="submit" class="btn-reset">↺ Reset</button>
+                </form>
+            </div>
         '''
     else:
         # Build dropdown options
@@ -668,20 +1046,16 @@ def _render_loop_controls(session, loop_prompts: dict[str, str]) -> str:
             for name in loop_prompts.keys()
         )
         return f'''
-            <span style="color:var(--text-secondary);">Loop Paused</span>
-            <form method="POST" action="/session/{session.session_id}/loop/enable" style="display:inline-flex;gap:4px;align-items:center;">
-                <select name="prompt_name" style="padding:4px 8px;border-radius:4px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:0.85em;">
-                    {options}
-                </select>
-                <button type="submit" style="background:var(--status-active);color:#000;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:0.85em;">
-                    ▶ Enable
-                </button>
-            </form>
-            <form method="POST" action="/session/{session.session_id}/loop/reset" style="display:inline;">
-                <button type="submit" style="background:var(--text-secondary);color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:0.85em;">
-                    ↺ Reset
-                </button>
-            </form>
+            <div class="loop-controls">
+                <span style="color:var(--text-secondary);">Loop Paused</span>
+                <form method="POST" action="/session/{session.session_id}/loop/enable">
+                    <select name="prompt_name">{options}</select>
+                    <button type="submit" class="btn-enable">▶ Enable</button>
+                </form>
+                <form method="POST" action="/session/{session.session_id}/loop/reset">
+                    <button type="submit" class="btn-reset">↺ Reset</button>
+                </form>
+            </div>
         '''
 
 
@@ -741,13 +1115,12 @@ def render_session_detail(session, dark_mode: str | None, loop_prompts: dict[str
 
         <div class="session-detail-meta">
             <strong>Workspace:</strong> {session.workspace_root}<br>
-            <strong>Session ID:</strong> {session.session_id}<br>
-            <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
-                {_render_loop_controls(session, loop_prompts)}
-                <form method="POST" action="/session/{session.session_id}/delete" style="display:inline;">
-                    <button type="submit" onclick="return confirm('Delete this session?')"
-                        style="background:#dc2626;color:white;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:0.85em;">
-                        Delete Session
+            <strong>Session ID:</strong> {session.session_id}
+            {_render_loop_controls(session, loop_prompts)}
+            <div class="loop-controls" style="margin-top:8px;">
+                <form method="POST" action="/session/{session.session_id}/delete">
+                    <button type="submit" onclick="return confirm('Delete this session?')" class="btn-delete">
+                        🗑 Delete Session
                     </button>
                 </form>
             </div>

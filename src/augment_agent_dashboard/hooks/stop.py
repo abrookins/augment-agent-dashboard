@@ -26,18 +26,22 @@ def load_config() -> dict:
 
 def send_notification(title: str, message: str, workspace_name: str, session_id: str, port: int = 9000, sound: bool = True) -> None:
     """Send a desktop notification using terminal-notifier if available."""
+    # URL to open the session in the dashboard
+    session_url = f"http://localhost:{port}/session/{urllib.parse.quote(session_id, safe='')}"
+
+    # Clean up message - remove newlines and extra whitespace
+    clean_message = " ".join(message.split())[:100] if message else "Turn complete"
+
+    # Send browser notification via dashboard API
+    send_browser_notification(title, f"{workspace_name}: {clean_message}", session_url, port)
+
+    # Also send macOS notification via terminal-notifier
     notifier = shutil.which("terminal-notifier")
     if not notifier:
         sys.stderr.write("terminal-notifier not found\n")
         return
 
-    # URL to open the session in the dashboard
-    session_url = f"http://localhost:{port}/session/{urllib.parse.quote(session_id, safe='')}"
-
     sys.stderr.write(f"Sending notification: title={title}, message={message[:50]}, url={session_url}\n")
-
-    # Clean up message - remove newlines and extra whitespace
-    clean_message = " ".join(message.split())[:100] if message else "Turn complete"
 
     cmd = [
         notifier,
@@ -56,6 +60,27 @@ def send_notification(title: str, message: str, workspace_name: str, session_id:
         sys.stderr.write(f"Notification result: rc={result.returncode}, stderr={result.stderr.decode()}\n")
     except Exception as e:
         sys.stderr.write(f"Notification error: {e}\n")
+
+
+def send_browser_notification(title: str, body: str, url: str, port: int = 9000) -> None:
+    """Send a browser notification via the dashboard API."""
+    import urllib.request
+
+    try:
+        data = urllib.parse.urlencode({
+            "title": title,
+            "body": body,
+            "url": url,
+        }).encode()
+        req = urllib.request.Request(
+            f"http://localhost:{port}/api/notifications/send",
+            data=data,
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            sys.stderr.write(f"Browser notification sent: {resp.status}\n")
+    except Exception as e:
+        sys.stderr.write(f"Browser notification error: {e}\n")
 
 
 def get_workspace_root(workspace_roots: list[str]) -> str | None:
