@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.10"
 
 [[package]]
@@ -42,6 +42,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "markdown" },
     { name = "psutil" },
+    { name = "python-multipart" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -50,7 +51,6 @@ dev = [
     { name = "httpx" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
-    { name = "python-multipart" },
     { name = "ruff" },
 ]
 
@@ -62,7 +62,7 @@ requires-dist = [
     { name = "psutil", specifier = ">=7.2.2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
-    { name = "python-multipart", marker = "extra == 'dev'", specifier = ">=0.0.22" },
+    { name = "python-multipart", specifier = ">=0.0.22" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.27.0" },
 ]
