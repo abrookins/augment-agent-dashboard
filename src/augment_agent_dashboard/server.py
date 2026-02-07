@@ -36,6 +36,19 @@ def get_store() -> SessionStore:
     return SessionStore()
 
 
+def _get_loop_prompts() -> dict[str, str]:
+    """Get loop prompts from config file."""
+    import json
+    config_path = Path.home() / ".augment" / "dashboard" / "config.json"
+    if config_path.exists():
+        try:
+            config = json.loads(config_path.read_text())
+            return config.get("loop_prompts", DEFAULT_LOOP_PROMPTS)
+        except Exception:
+            pass
+    return DEFAULT_LOOP_PROMPTS.copy()
+
+
 async def spawn_auggie_message(conversation_id: str, workspace_root: str, message: str) -> bool:
     """Spawn auggie subprocess to inject a message into a session.
 
@@ -89,7 +102,8 @@ async def session_detail(session_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Session not found")
 
     dark_mode = request.query_params.get("dark", None)
-    html = render_session_detail(session, dark_mode)
+    loop_prompts = _get_loop_prompts()
+    html = render_session_detail(session, dark_mode, loop_prompts)
     return HTMLResponse(content=html)
 
 
@@ -167,8 +181,8 @@ async def api_get_session(session_id: str):
 
 
 @app.post("/session/{session_id}/loop/enable")
-async def enable_loop(session_id: str):
-    """Enable the quality loop for a session."""
+async def enable_loop(session_id: str, prompt_name: Annotated[str, Form()]):
+    """Enable the quality loop for a session with a specific prompt."""
     store = get_store()
     session = store.get_session(session_id)
 
@@ -177,6 +191,8 @@ async def enable_loop(session_id: str):
 
     session.loop_enabled = True
     session.loop_count = 0
+    session.loop_prompt_name = prompt_name
+    session.loop_started_at = datetime.now(timezone.utc)
     store.upsert_session(session)
 
     return RedirectResponse(url=f"/session/{session_id}", status_code=303)
@@ -603,7 +619,73 @@ def render_dashboard(sessions: list, dark_mode: str | None, sort_by: str = "rece
     """
 
 
-def render_session_detail(session, dark_mode: str | None) -> str:
+def _format_elapsed_time(started_at: datetime | None) -> str:
+    """Format elapsed time since loop started."""
+    if not started_at:
+        return ""
+    now = datetime.now(timezone.utc)
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=timezone.utc)
+    elapsed = now - started_at
+    total_seconds = int(elapsed.total_seconds())
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours}h {minutes}m"
+    elif minutes > 0:
+        return f"{minutes}m {seconds}s"
+    else:
+        return f"{seconds}s"
+
+
+def _render_loop_controls(session, loop_prompts: dict[str, str]) -> str:
+    """Render the loop control UI section."""
+    if session.loop_enabled:
+        elapsed = _format_elapsed_time(session.loop_started_at)
+        prompt_name = session.loop_prompt_name or "Unknown"
+        return f'''
+            <span style="color:var(--status-active);font-weight:bold;">
+                🔄 Loop Active: {html.escape(prompt_name)}
+            </span>
+            <span style="color:var(--text-secondary);">
+                ({session.loop_count} iterations, {elapsed})
+            </span>
+            <form method="POST" action="/session/{session.session_id}/loop/pause" style="display:inline;">
+                <button type="submit" style="background:#fbbf24;color:#000;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:0.85em;">
+                    ⏸ Pause
+                </button>
+            </form>
+            <form method="POST" action="/session/{session.session_id}/loop/reset" style="display:inline;">
+                <button type="submit" style="background:var(--text-secondary);color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:0.85em;">
+                    ↺ Reset
+                </button>
+            </form>
+        '''
+    else:
+        # Build dropdown options
+        options = "".join(
+            f'<option value="{html.escape(name)}">{html.escape(name)}</option>'
+            for name in loop_prompts.keys()
+        )
+        return f'''
+            <span style="color:var(--text-secondary);">Loop Paused</span>
+            <form method="POST" action="/session/{session.session_id}/loop/enable" style="display:inline-flex;gap:4px;align-items:center;">
+                <select name="prompt_name" style="padding:4px 8px;border-radius:4px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:0.85em;">
+                    {options}
+                </select>
+                <button type="submit" style="background:var(--status-active);color:#000;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:0.85em;">
+                    ▶ Enable
+                </button>
+            </form>
+            <form method="POST" action="/session/{session.session_id}/loop/reset" style="display:inline;">
+                <button type="submit" style="background:var(--text-secondary);color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:0.85em;">
+                    ↺ Reset
+                </button>
+            </form>
+        '''
+
+
+def render_session_detail(session, dark_mode: str | None, loop_prompts: dict[str, str]) -> str:
     """Render the session detail HTML."""
     styles = get_base_styles(dark_mode)
 
@@ -661,21 +743,7 @@ def render_session_detail(session, dark_mode: str | None) -> str:
             <strong>Workspace:</strong> {session.workspace_root}<br>
             <strong>Session ID:</strong> {session.session_id}<br>
             <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
-                {"<span style='color:var(--status-active);font-weight:bold;'>🔄 Loop Active (" + str(session.loop_count) + " iterations)</span>" if session.loop_enabled else "<span style='color:var(--text-secondary);'>Loop Paused</span>"}
-                {'''<form method="POST" action="/session/''' + session.session_id + '''/loop/pause" style="display:inline;">
-                    <button type="submit" style="background:#fbbf24;color:#000;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:0.85em;">
-                        ⏸ Pause Loop
-                    </button>
-                </form>''' if session.loop_enabled else '''<form method="POST" action="/session/''' + session.session_id + '''/loop/enable" style="display:inline;">
-                    <button type="submit" style="background:var(--status-active);color:#000;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:0.85em;">
-                        ▶ Enable Loop
-                    </button>
-                </form>'''}
-                <form method="POST" action="/session/{session.session_id}/loop/reset" style="display:inline;">
-                    <button type="submit" style="background:var(--text-secondary);color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:0.85em;">
-                        ↺ Reset Count
-                    </button>
-                </form>
+                {_render_loop_controls(session, loop_prompts)}
                 <form method="POST" action="/session/{session.session_id}/delete" style="display:inline;">
                     <button type="submit" onclick="return confirm('Delete this session?')"
                         style="background:#dc2626;color:white;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:0.85em;">
@@ -730,10 +798,28 @@ def render_session_detail(session, dark_mode: str | None) -> str:
     """
 
 
-DEFAULT_LOOP_PROMPT = """Did you use TDD, reach 100% test coverage, and verify quality at .8 or above with mfcqi? If not, continue working. If choices must be made, choose wisely."""
+DEFAULT_LOOP_PROMPTS = {
+    "TDD Quality": "Did you use TDD, reach 100% test coverage, and verify quality at .8 or above with mfcqi? If not, continue working. If choices must be made, choose wisely.",
+    "Code Review": "Review the code you just wrote. Look for bugs, security issues, performance problems, and style violations. Fix any issues you find.",
+    "Refactor": "Look at the code you just wrote. Can it be simplified, made more readable, or better organized? Refactor if so.",
+    "Documentation": "Review the code you just wrote. Is it well-documented? Add or improve docstrings, comments, and type hints as needed.",
+    "Test Coverage": "Check test coverage for the code you just wrote. Write additional tests to cover edge cases and error conditions.",
+}
 
 
-def save_config(port: int, notification_sound: bool, loop_prompt: str, max_loop_iterations: int) -> None:
+def load_loop_prompts(prompts_file: str | None) -> dict[str, str]:
+    """Load loop prompts from file or return defaults."""
+    import json
+    if prompts_file:
+        try:
+            with open(prompts_file) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return DEFAULT_LOOP_PROMPTS.copy()
+
+
+def save_config(port: int, notification_sound: bool, loop_prompts: dict[str, str], max_loop_iterations: int) -> None:
     """Save dashboard config for hooks to read."""
     import json
     config_dir = Path.home() / ".augment" / "dashboard"
@@ -742,7 +828,7 @@ def save_config(port: int, notification_sound: bool, loop_prompt: str, max_loop_
     config_path.write_text(json.dumps({
         "port": port,
         "notification_sound": notification_sound,
-        "loop_prompt": loop_prompt,
+        "loop_prompts": loop_prompts,
         "max_loop_iterations": max_loop_iterations,
     }))
 
@@ -764,8 +850,8 @@ def main():
         "--no-sound", action="store_true", help="Disable notification sound"
     )
     parser.add_argument(
-        "--loop-prompt", type=str, default=DEFAULT_LOOP_PROMPT,
-        help="Prompt to send after each turn when loop is enabled"
+        "--loop-prompts-file", type=str, default=None,
+        help="JSON file with loop prompts dict {name: prompt}"
     )
     parser.add_argument(
         "--max-loop-iterations", type=int, default=50,
@@ -776,8 +862,11 @@ def main():
     # Determine sound setting
     notification_sound = not args.no_sound
 
+    # Load loop prompts
+    loop_prompts = load_loop_prompts(args.loop_prompts_file)
+
     # Save config for hooks
-    save_config(args.port, notification_sound, args.loop_prompt, args.max_loop_iterations)
+    save_config(args.port, notification_sound, loop_prompts, args.max_loop_iterations)
 
     uvicorn.run(app, host="0.0.0.0", port=args.port)
 

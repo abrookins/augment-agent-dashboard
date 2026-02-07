@@ -203,13 +203,13 @@ def run_hook() -> None:
                 session.loop_count += 1
                 store.upsert_session(session)
 
-                # Get loop prompt from config
-                loop_prompt = config.get(
-                    "loop_prompt",
-                    "Did you use TDD, reach 100% test coverage, and verify quality at .8 or above with mfcqi? If not, continue working. If choices must be made, choose wisely."
-                )
+                # Get loop prompt from config using the session's selected prompt name
+                loop_prompts = config.get("loop_prompts", {})
+                prompt_name = session.loop_prompt_name
+                default_prompt = "Did you use TDD, reach 100% test coverage, and verify quality at .8 or above with mfcqi? If not, continue working. If choices must be made, choose wisely."
+                loop_prompt = loop_prompts.get(prompt_name, default_prompt) if prompt_name else default_prompt
 
-                sys.stderr.write(f"Quality loop iteration {session.loop_count}/{max_iterations}\n")
+                sys.stderr.write(f"Quality loop iteration {session.loop_count}/{max_iterations} using '{prompt_name}'\n")
 
                 # Spawn auggie with the loop prompt
                 spawn_loop_message(conversation_id, workspace_root, loop_prompt)

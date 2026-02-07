@@ -66,6 +66,8 @@ class AgentSession:
     # Quality loop settings
     loop_enabled: bool = False
     loop_count: int = 0
+    loop_prompt_name: str | None = None  # Name of the selected loop prompt
+    loop_started_at: datetime | None = None  # When the loop was enabled
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
@@ -85,11 +87,14 @@ class AgentSession:
             "agent_pid": self.agent_pid,
             "loop_enabled": self.loop_enabled,
             "loop_count": self.loop_count,
+            "loop_prompt_name": self.loop_prompt_name,
+            "loop_started_at": self.loop_started_at.isoformat() if self.loop_started_at else None,
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "AgentSession":
         """Create from dictionary."""
+        loop_started_at = data.get("loop_started_at")
         return cls(
             session_id=data["session_id"],
             conversation_id=data["conversation_id"],
@@ -106,6 +111,8 @@ class AgentSession:
             agent_pid=data.get("agent_pid"),
             loop_enabled=data.get("loop_enabled", False),
             loop_count=data.get("loop_count", 0),
+            loop_prompt_name=data.get("loop_prompt_name"),
+            loop_started_at=datetime.fromisoformat(loop_started_at) if loop_started_at else None,
         )
 
     @property
