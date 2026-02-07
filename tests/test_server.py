@@ -701,3 +701,344 @@ class TestGetBaseStyles:
 
         result = get_base_styles(None)
         assert "prefers-color-scheme" in result  # Should have media query
+
+
+class TestGetFullConfig:
+    """Tests for _get_full_config function."""
+
+    def test_get_full_config_no_file(self, tmp_path, monkeypatch):
+        """Test when config file doesn't exist."""
+        from augment_agent_dashboard.server import _get_full_config
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        result = _get_full_config()
+        assert result == {}
+
+    def test_get_full_config_with_file(self, tmp_path, monkeypatch):
+        """Test when config file exists."""
+        from augment_agent_dashboard.server import _get_full_config
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        config_dir = tmp_path / ".augment" / "dashboard"
+        config_dir.mkdir(parents=True)
+        (config_dir / "config.json").write_text('{"key": "value"}')
+
+        result = _get_full_config()
+        assert result == {"key": "value"}
+
+    def test_get_full_config_invalid_json(self, tmp_path, monkeypatch):
+        """Test when config file has invalid JSON."""
+        from augment_agent_dashboard.server import _get_full_config
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        config_dir = tmp_path / ".augment" / "dashboard"
+        config_dir.mkdir(parents=True)
+        (config_dir / "config.json").write_text('not valid json')
+
+        result = _get_full_config()
+        assert result == {}
+
+
+class TestLoadLoopPrompts:
+    """Tests for load_loop_prompts function."""
+
+    def test_load_loop_prompts_no_file(self):
+        """Test with no file specified."""
+        from augment_agent_dashboard.server import load_loop_prompts, DEFAULT_LOOP_PROMPTS
+        result = load_loop_prompts(None)
+        assert result == DEFAULT_LOOP_PROMPTS
+
+    def test_load_loop_prompts_with_file(self, tmp_path):
+        """Test with valid file."""
+        from augment_agent_dashboard.server import load_loop_prompts
+        prompts_file = tmp_path / "prompts.json"
+        prompts_file.write_text('{"custom": "prompt"}')
+
+        result = load_loop_prompts(str(prompts_file))
+        assert result == {"custom": "prompt"}
+
+    def test_load_loop_prompts_invalid_file(self, tmp_path):
+        """Test with invalid file."""
+        from augment_agent_dashboard.server import load_loop_prompts, DEFAULT_LOOP_PROMPTS
+        prompts_file = tmp_path / "prompts.json"
+        prompts_file.write_text('not valid json')
+
+        result = load_loop_prompts(str(prompts_file))
+        assert result == DEFAULT_LOOP_PROMPTS
+
+    def test_load_loop_prompts_missing_file(self):
+        """Test with missing file."""
+        from augment_agent_dashboard.server import load_loop_prompts, DEFAULT_LOOP_PROMPTS
+        result = load_loop_prompts("/nonexistent/file.json")
+        assert result == DEFAULT_LOOP_PROMPTS
+
+
+class TestSaveConfig:
+    """Tests for save_config function."""
+
+    def test_save_config(self, tmp_path, monkeypatch):
+        """Test saving config."""
+        import json
+        from augment_agent_dashboard.server import save_config
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+        save_config(9000, True, {"test": "prompt"}, 100)
+
+        config_path = tmp_path / ".augment" / "dashboard" / "config.json"
+        assert config_path.exists()
+        config = json.loads(config_path.read_text())
+        assert config["port"] == 9000
+        assert config["notification_sound"] is True
+        assert config["loop_prompts"] == {"test": "prompt"}
+        assert config["max_loop_iterations"] == 100
+
+
+class TestFormatElapsedTime:
+    """Tests for _format_elapsed_time function."""
+
+    def test_format_elapsed_time_none(self):
+        """Test with None input."""
+        from augment_agent_dashboard.server import _format_elapsed_time
+        result = _format_elapsed_time(None)
+        assert result == ""
+
+    def test_format_elapsed_time_seconds(self):
+        """Test with seconds only."""
+        from datetime import datetime, timezone, timedelta
+        from augment_agent_dashboard.server import _format_elapsed_time
+
+        started = datetime.now(timezone.utc) - timedelta(seconds=30)
+        result = _format_elapsed_time(started)
+        assert "s" in result
+
+    def test_format_elapsed_time_minutes(self):
+        """Test with minutes."""
+        from datetime import datetime, timezone, timedelta
+        from augment_agent_dashboard.server import _format_elapsed_time
+
+        started = datetime.now(timezone.utc) - timedelta(minutes=5, seconds=30)
+        result = _format_elapsed_time(started)
+        assert "m" in result and "s" in result
+
+    def test_format_elapsed_time_hours(self):
+        """Test with hours."""
+        from datetime import datetime, timezone, timedelta
+        from augment_agent_dashboard.server import _format_elapsed_time
+
+        started = datetime.now(timezone.utc) - timedelta(hours=2, minutes=30)
+        result = _format_elapsed_time(started)
+        assert "h" in result and "m" in result
+
+    def test_format_elapsed_time_naive_datetime(self):
+        """Test with naive datetime."""
+        from datetime import datetime, timezone, timedelta
+        from augment_agent_dashboard.server import _format_elapsed_time
+
+        utc_now = datetime.now(timezone.utc)
+        started = utc_now.replace(tzinfo=None) - timedelta(minutes=5)
+        result = _format_elapsed_time(started)
+        assert "m" in result
+
+
+class TestRenderMessageForm:
+    """Tests for _render_message_form function."""
+
+    def test_render_message_form_active(self, sample_session):
+        """Test rendering form for active session."""
+        from augment_agent_dashboard.server import _render_message_form
+        from augment_agent_dashboard.models import SessionStatus
+
+        sample_session.status = SessionStatus.ACTIVE
+        result = _render_message_form(sample_session)
+        assert "queue" in result.lower()
+
+    def test_render_message_form_idle(self, sample_session):
+        """Test rendering form for idle session."""
+        from augment_agent_dashboard.server import _render_message_form
+        from augment_agent_dashboard.models import SessionStatus
+
+        sample_session.status = SessionStatus.IDLE
+        result = _render_message_form(sample_session)
+        assert "message" in result.lower()
+
+    def test_render_message_form_with_queued(self, sample_session):
+        """Test rendering form with queued messages."""
+        from augment_agent_dashboard.server import _render_message_form
+        from augment_agent_dashboard.models import SessionStatus, SessionMessage
+
+        sample_session.status = SessionStatus.ACTIVE
+        sample_session.messages = [
+            SessionMessage(role="queued", content="test1"),
+            SessionMessage(role="queued", content="test2"),
+        ]
+        result = _render_message_form(sample_session)
+        assert "2 queued" in result
+
+
+class TestRenderSessionDetail:
+    """Tests for render_session_detail function."""
+
+    def test_render_session_detail_empty_messages(self, sample_session):
+        """Test rendering session with empty messages."""
+        from augment_agent_dashboard.server import render_session_detail
+
+        sample_session.messages = []
+        result = render_session_detail(sample_session, None, {})
+        assert "No messages" in result
+
+    def test_render_session_detail_with_messages(self, sample_session):
+        """Test rendering session with messages."""
+        from augment_agent_dashboard.server import render_session_detail
+        from augment_agent_dashboard.models import SessionMessage
+
+        sample_session.messages = [
+            SessionMessage(role="user", content="Hello"),
+            SessionMessage(role="assistant", content="Hi there"),
+        ]
+        result = render_session_detail(sample_session, None, {})
+        assert "Hello" in result
+        assert "Hi there" in result
+
+    def test_render_session_detail_with_queued(self, sample_session):
+        """Test rendering session with queued messages."""
+        from augment_agent_dashboard.server import render_session_detail
+        from augment_agent_dashboard.models import SessionMessage
+
+        sample_session.messages = [
+            SessionMessage(role="queued", content="Queued message"),
+        ]
+        result = render_session_detail(sample_session, None, {})
+        assert "Queued" in result
+        assert "Clear Queue" in result
+
+
+class TestGetStore:
+    """Tests for get_store function."""
+
+    def test_get_store(self):
+        """Test get_store returns a SessionStore."""
+        from augment_agent_dashboard.server import get_store
+        from augment_agent_dashboard.store import SessionStore
+
+        store = get_store()
+        assert isinstance(store, SessionStore)
+
+
+class TestRenderLoopControls:
+    """Tests for _render_loop_controls function."""
+
+    def test_render_loop_controls_enabled(self, sample_session):
+        """Test rendering loop controls when enabled."""
+        from datetime import datetime, timezone
+        from augment_agent_dashboard.server import _render_loop_controls
+
+        sample_session.loop_enabled = True
+        sample_session.loop_count = 5
+        sample_session.loop_prompt_name = "Test Prompt"
+        sample_session.loop_started_at = datetime.now(timezone.utc)
+
+        result = _render_loop_controls(sample_session, {"Test Prompt": "prompt text"})
+        assert "Test Prompt" in result
+        assert "5 iterations" in result
+
+    def test_render_loop_controls_disabled(self, sample_session):
+        """Test rendering loop controls when disabled."""
+        from augment_agent_dashboard.server import _render_loop_controls
+
+        sample_session.loop_enabled = False
+        result = _render_loop_controls(sample_session, {"Default": "prompt"})
+        assert "Loop Paused" in result or "loop-controls" in result
+
+
+class TestMain:
+    """Tests for main entry point."""
+
+    def test_main_default_args(self, tmp_path, monkeypatch):
+        """Test main with default arguments."""
+        import sys
+        from augment_agent_dashboard import server
+
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        monkeypatch.setattr(sys, "argv", ["augment-dashboard"])
+
+        # Mock uvicorn.run to prevent actually starting the server
+        uvicorn_called = {}
+        def mock_uvicorn_run(app, host, port):
+            uvicorn_called["app"] = app
+            uvicorn_called["host"] = host
+            uvicorn_called["port"] = port
+
+        with patch("uvicorn.run", mock_uvicorn_run):
+            server.main()
+
+        assert uvicorn_called["port"] == 8080
+        assert uvicorn_called["host"] == "0.0.0.0"
+
+    def test_main_custom_port(self, tmp_path, monkeypatch):
+        """Test main with custom port."""
+        import sys
+        from augment_agent_dashboard import server
+
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        monkeypatch.setattr(sys, "argv", ["augment-dashboard", "--port", "9000"])
+
+        uvicorn_called = {}
+        def mock_uvicorn_run(app, host, port):
+            uvicorn_called["port"] = port
+
+        with patch("uvicorn.run", mock_uvicorn_run):
+            server.main()
+
+        assert uvicorn_called["port"] == 9000
+
+    def test_main_no_sound(self, tmp_path, monkeypatch):
+        """Test main with --no-sound flag."""
+        import sys
+        import json
+        from augment_agent_dashboard import server
+
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        monkeypatch.setattr(sys, "argv", ["augment-dashboard", "--no-sound"])
+
+        with patch("uvicorn.run"):
+            server.main()
+
+        # Check config was saved with sound disabled
+        config_path = tmp_path / ".augment" / "dashboard" / "config.json"
+        config = json.loads(config_path.read_text())
+        assert config["notification_sound"] is False
+
+    def test_main_with_loop_prompts_file(self, tmp_path, monkeypatch):
+        """Test main with custom loop prompts file."""
+        import sys
+        import json
+        from augment_agent_dashboard import server
+
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+        # Create custom prompts file
+        prompts_file = tmp_path / "prompts.json"
+        prompts_file.write_text('{"Custom": "custom prompt"}')
+
+        monkeypatch.setattr(sys, "argv", ["augment-dashboard", "--loop-prompts-file", str(prompts_file)])
+
+        with patch("uvicorn.run"):
+            server.main()
+
+        # Check config was saved with custom prompts
+        config_path = tmp_path / ".augment" / "dashboard" / "config.json"
+        config = json.loads(config_path.read_text())
+        assert "Custom" in config["loop_prompts"]
+
+    def test_main_max_loop_iterations(self, tmp_path, monkeypatch):
+        """Test main with custom max loop iterations."""
+        import sys
+        import json
+        from augment_agent_dashboard import server
+
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        monkeypatch.setattr(sys, "argv", ["augment-dashboard", "--max-loop-iterations", "100"])
+
+        with patch("uvicorn.run"):
+            server.main()
+
+        config_path = tmp_path / ".augment" / "dashboard" / "config.json"
+        config = json.loads(config_path.read_text())
+        assert config["max_loop_iterations"] == 100

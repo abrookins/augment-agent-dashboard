@@ -639,3 +639,131 @@ class TestStopHookLoopLogic:
         mock_spawn.assert_called_once()
         assert "Do this next" in mock_spawn.call_args[0][2]
 
+
+class TestMainEntryPoints:
+    """Tests for main() entry points in hooks."""
+
+    @patch("augment_agent_dashboard.hooks.session_start.run_hook")
+    def test_session_start_main(self, mock_run):
+        """Test session_start main calls run_hook."""
+        session_start.main()
+        mock_run.assert_called_once()
+
+    @patch("augment_agent_dashboard.hooks.stop.run_hook")
+    def test_stop_main(self, mock_run):
+        """Test stop main calls run_hook."""
+        stop.main()
+        mock_run.assert_called_once()
+
+    @patch("augment_agent_dashboard.hooks.tool_use.run_post_tool_use")
+    def test_tool_use_main(self, mock_run):
+        """Test tool_use main calls run_post_tool_use."""
+        tool_use.main()
+        mock_run.assert_called_once()
+
+    @patch("augment_agent_dashboard.hooks.tool_use.run_hook")
+    def test_tool_use_run_post_tool_use(self, mock_run):
+        """Test run_post_tool_use calls run_hook with PostToolUse."""
+        tool_use.run_post_tool_use()
+        mock_run.assert_called_once_with("PostToolUse")
+
+
+class TestStopHookDebugLog:
+    """Tests for stop hook debug logging."""
+
+    @patch("augment_agent_dashboard.hooks.stop.SessionStore")
+    @patch("augment_agent_dashboard.hooks.stop.load_config")
+    @patch("sys.stdin", new_callable=io.StringIO)
+    def test_debug_log_error(self, mock_stdin, mock_config, mock_store_class, tmp_path, monkeypatch):
+        """Test debug log error handling."""
+        # Make the debug log path unwritable
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+        mock_store = MagicMock()
+        mock_store.get_session.return_value = None
+        mock_store_class.return_value = mock_store
+        mock_config.return_value = {}
+
+        mock_stdin.write(json.dumps({
+            "workspace_roots": ["/path"],
+            "conversation_id": "conv-123",
+            "conversation": {}
+        }))
+        mock_stdin.seek(0)
+
+        # This should not raise even if debug log fails
+        stop.run_hook()
+
+
+class TestStopHookFilesChanged:
+    """Tests for stop hook files changed tracking."""
+
+    @patch("augment_agent_dashboard.hooks.stop.SessionStore")
+    @patch("augment_agent_dashboard.hooks.stop.load_config")
+    @patch("sys.stdin", new_callable=io.StringIO)
+    def test_files_changed_non_dict(self, mock_stdin, mock_config, mock_store_class):
+        """Test handling non-dict items in agentCodeResponse."""
+        mock_store = MagicMock()
+        mock_store.get_session.return_value = None
+        mock_store_class.return_value = mock_store
+        mock_config.return_value = {}
+
+        mock_stdin.write(json.dumps({
+            "workspace_roots": ["/path"],
+            "conversation_id": "conv-123",
+            "conversation": {
+                "agentCodeResponse": ["not a dict", {"path": "file.py"}, {"no_path": "here"}]
+            }
+        }))
+        mock_stdin.seek(0)
+
+        stop.run_hook()
+        # Should not raise
+
+
+class TestStopHookJsonDecodeError:
+    """Tests for stop hook JSON decode error handling."""
+
+    @patch("augment_agent_dashboard.hooks.stop.SessionStore")
+    @patch("augment_agent_dashboard.hooks.stop.load_config")
+    @patch("sys.stdin", new_callable=io.StringIO)
+    def test_invalid_json_input(self, mock_stdin, mock_config, mock_store_class, capsys):
+        """Test handling invalid JSON input."""
+        mock_store = MagicMock()
+        mock_store.get_session.return_value = None
+        mock_store_class.return_value = mock_store
+        mock_config.return_value = {}
+
+        mock_stdin.write("not valid json {{{")
+        mock_stdin.seek(0)
+
+        stop.run_hook()
+        # Should not raise, should output empty JSON
+        captured = capsys.readouterr()
+        assert "{}" in captured.out
+
+
+class TestStopHookStoreError:
+    """Tests for stop hook store error handling."""
+
+    @patch("augment_agent_dashboard.hooks.stop.SessionStore")
+    @patch("augment_agent_dashboard.hooks.stop.load_config")
+    @patch("sys.stdin", new_callable=io.StringIO)
+    def test_store_exception(self, mock_stdin, mock_config, mock_store_class, capsys):
+        """Test handling store exception."""
+        mock_store_class.side_effect = Exception("Store error")
+        mock_config.return_value = {}
+
+        mock_stdin.write(json.dumps({
+            "workspace_roots": ["/path"],
+            "conversation_id": "conv-123",
+            "conversation": {}
+        }))
+        mock_stdin.seek(0)
+
+        stop.run_hook()
+        # Should not raise, should output empty JSON and log error
+        captured = capsys.readouterr()
+        assert "{}" in captured.out
+        assert "Dashboard store error" in captured.err
+

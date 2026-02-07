@@ -110,12 +110,12 @@ class TestInstallHooks:
     @patch("augment_agent_dashboard.install.find_command_path")
     def test_install_hooks_preserves_existing(self, mock_find, tmp_path, monkeypatch, capsys):
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
-        
+
         def find_path(cmd):
             return f"/fake/{cmd}"
-        
+
         mock_find.side_effect = find_path
-        
+
         # Create existing settings with other hooks
         augment_dir = tmp_path / ".augment"
         augment_dir.mkdir()
@@ -127,20 +127,94 @@ class TestInstallHooks:
                 ]
             }
         }))
-        
+
         install.install_hooks()
-        
+
         # Verify other hooks were preserved
         settings = json.loads(settings_file.read_text())
         session_start_hooks = settings["hooks"]["SessionStart"]
-        
+
         # Should have both the original and the dashboard hook
         assert len(session_start_hooks) == 2
         commands = []
         for entry in session_start_hooks:
             for hook in entry.get("hooks", []):
                 commands.append(hook.get("command", ""))
-        
+
         assert any("/other/plugin/hook.sh" in c for c in commands)
         assert any("/dashboard/hooks/" in c for c in commands)
+
+    @patch("augment_agent_dashboard.install.find_command_path")
+    def test_install_hooks_updates_existing_dashboard_hook(self, mock_find, tmp_path, monkeypatch, capsys):
+        """Test that existing dashboard hooks are updated, not duplicated."""
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+        def find_path(cmd):
+            return f"/fake/{cmd}"
+
+        mock_find.side_effect = find_path
+
+        # Create existing settings with dashboard hook already present
+        augment_dir = tmp_path / ".augment"
+        augment_dir.mkdir()
+        settings_file = augment_dir / "settings.json"
+        settings_file.write_text(json.dumps({
+            "hooks": {
+                "SessionStart": [
+                    {"hooks": [{"type": "command", "command": "/old/dashboard/hooks/session-start.sh"}]}
+                ]
+            }
+        }))
+
+        install.install_hooks()
+
+        # Verify dashboard hook was updated, not duplicated
+        settings = json.loads(settings_file.read_text())
+        session_start_hooks = settings["hooks"]["SessionStart"]
+
+        # Should have only one hook (the updated dashboard hook)
+        assert len(session_start_hooks) == 1
+        # The command should be the new one
+        hook_cmd = session_start_hooks[0]["hooks"][0]["command"]
+        assert "/dashboard/hooks/" in hook_cmd
+
+    @patch("augment_agent_dashboard.install.find_command_path")
+    def test_install_hooks_cleans_old_hook_files(self, mock_find, tmp_path, monkeypatch, capsys):
+        """Test that old hook config files are cleaned up."""
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+        def find_path(cmd):
+            return f"/fake/{cmd}"
+
+        mock_find.side_effect = find_path
+
+        # Create augment dir and old hooks dir with old files
+        augment_dir = tmp_path / ".augment"
+        augment_dir.mkdir()
+        old_hooks_dir = augment_dir / "hooks"
+        old_hooks_dir.mkdir()
+
+        old_session_start = old_hooks_dir / "dashboard-session-start.json"
+        old_stop = old_hooks_dir / "dashboard-stop.json"
+        old_session_start.write_text("{}")
+        old_stop.write_text("{}")
+
+        install.install_hooks()
+
+        # Verify old files were removed
+        assert not old_session_start.exists()
+        assert not old_stop.exists()
+
+        captured = capsys.readouterr()
+        assert "Removed old config" in captured.out
+
+
+class TestMain:
+    """Tests for main entry point."""
+
+    @patch("augment_agent_dashboard.install.install_hooks")
+    def test_main(self, mock_install):
+        """Test main calls install_hooks."""
+        install.main()
+        mock_install.assert_called_once()
 

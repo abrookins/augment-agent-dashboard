@@ -3,11 +3,41 @@
 import json
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from augment_agent_dashboard.models import AgentSession, SessionMessage, SessionStatus
 from augment_agent_dashboard.store import SessionStore
+
+
+class TestModuleFunctions:
+    """Tests for module-level functions."""
+
+    def test_get_dashboard_dir(self, tmp_path, monkeypatch):
+        """Test get_dashboard_dir creates directory."""
+        from augment_agent_dashboard.store import get_dashboard_dir
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+        result = get_dashboard_dir()
+        assert result.exists()
+        assert result == tmp_path / ".augment" / "dashboard"
+
+    def test_get_sessions_file(self, tmp_path, monkeypatch):
+        """Test get_sessions_file returns correct path."""
+        from augment_agent_dashboard.store import get_sessions_file
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+        result = get_sessions_file()
+        assert result == tmp_path / ".augment" / "dashboard" / "sessions.json"
+
+    def test_get_lock_file(self, tmp_path, monkeypatch):
+        """Test get_lock_file returns correct path."""
+        from augment_agent_dashboard.store import get_lock_file
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+        result = get_lock_file()
+        assert result == tmp_path / ".augment" / "dashboard" / "sessions.lock"
 
 
 @pytest.fixture
@@ -145,6 +175,12 @@ class TestSessionStore:
         assert retrieved is not None
         assert len(retrieved.messages) == 1
         assert retrieved.messages[0].content == "Hello"
+
+    def test_add_message_not_found(self, temp_store):
+        """Test adding message to non-existent session."""
+        msg = SessionMessage(role="user", content="Hello")
+        result = temp_store.add_message("nonexistent", msg)
+        assert result is False
 
     def test_add_dashboard_message(self, temp_store, sample_session):
         """Test adding a dashboard message."""
