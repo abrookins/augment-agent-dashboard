@@ -51,9 +51,8 @@ def run_hook(hook_type: str = "PreToolUse"):
     tool_name = tool_use.get("name", "unknown")
     tool_input = tool_use.get("input", {})
 
-    sys.stderr.write(
-        f"Dashboard {hook_type}: session={session_id}, tool={tool_name}\n"
-    )
+    # Debug logging disabled to reduce noise
+    # sys.stderr.write(f"Dashboard {hook_type}: session={session_id}, tool={tool_name}\n")
 
     try:
         store = SessionStore()

@@ -41,7 +41,7 @@ def send_notification(title: str, message: str, workspace_name: str, session_id:
         sys.stderr.write("terminal-notifier not found\n")
         return
 
-    sys.stderr.write(f"Sending notification: title={title}, message={message[:50]}, url={session_url}\n")
+    # Debug logging disabled to reduce noise
 
     cmd = [
         notifier,
@@ -57,7 +57,7 @@ def send_notification(title: str, message: str, workspace_name: str, session_id:
 
     try:
         result = subprocess.run(cmd, capture_output=True, timeout=5)
-        sys.stderr.write(f"Notification result: rc={result.returncode}, stderr={result.stderr.decode()}\n")
+        pass  # Notification sent successfully
     except Exception as e:
         sys.stderr.write(f"Notification error: {e}\n")
 
@@ -78,7 +78,7 @@ def send_browser_notification(title: str, body: str, url: str, port: int = 9000)
             method="POST"
         )
         with urllib.request.urlopen(req, timeout=2) as resp:
-            sys.stderr.write(f"Browser notification sent: {resp.status}\n")
+            pass  # Browser notification sent
     except Exception as e:
         sys.stderr.write(f"Browser notification error: {e}\n")
 
@@ -122,7 +122,7 @@ def spawn_loop_message(conversation_id: str, workspace_root: str | None, message
             stderr=subprocess.DEVNULL,
             start_new_session=True,  # Detach from parent process
         )
-        sys.stderr.write(f"Spawned loop message for {conversation_id}\n")
+        pass  # Loop message spawned
     except Exception as e:
         sys.stderr.write(f"Failed to spawn loop message: {e}\n")
 
@@ -155,9 +155,7 @@ def run_hook() -> None:
     workspace_name = get_workspace_name(workspace_root)
     session_id = get_session_id(conversation_id)
 
-    sys.stderr.write(
-        f"Dashboard Stop: session={session_id}, workspace={workspace_root}\n"
-    )
+    # Debug logging disabled to reduce noise
 
     try:
         store = SessionStore()
@@ -220,7 +218,7 @@ def run_hook() -> None:
             )
             store.upsert_session(session)
 
-        sys.stderr.write(f"Updated dashboard session: {session_id}\n")
+        # Session updated successfully
 
         # Load config for notifications and loop settings
         config = load_config()
@@ -251,7 +249,7 @@ def run_hook() -> None:
                 default_prompt = "Did you use TDD, reach 100% test coverage, and verify quality at .8 or above with mfcqi? If not, continue working. If choices must be made, choose wisely."
                 loop_prompt = loop_prompts.get(prompt_name, default_prompt) if prompt_name else default_prompt
 
-                sys.stderr.write(f"Quality loop iteration {session.loop_count}/{max_iterations} using '{prompt_name}'\n")
+                # Quality loop iteration logged
 
                 # Spawn auggie with the loop prompt
                 spawn_loop_message(conversation_id, workspace_root, loop_prompt)
@@ -259,7 +257,7 @@ def run_hook() -> None:
                 # Max iterations reached, disable loop
                 session.loop_enabled = False
                 store.upsert_session(session)
-                sys.stderr.write(f"Quality loop reached max iterations ({max_iterations}), disabling\n")
+                # Quality loop reached max iterations
                 send_notification(
                     "Quality Loop Complete",
                     f"Reached {max_iterations} iterations",
@@ -274,7 +272,7 @@ def run_hook() -> None:
             if queued_messages:
                 # Get the first queued message
                 next_msg = queued_messages[0]
-                sys.stderr.write(f"Processing queued message: {next_msg.content[:50]}...\n")
+                # Processing queued message
 
                 # Convert queued message to user message
                 next_msg.role = "user"
