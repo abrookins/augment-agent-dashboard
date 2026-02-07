@@ -87,62 +87,60 @@ def install_hooks() -> None:
     if "hooks" not in settings:
         settings["hooks"] = {}
 
-    # Add SessionStart hook
-    settings["hooks"]["SessionStart"] = [
-        {
+    # Dashboard hook identifier - used to find and update our hooks
+    DASHBOARD_MARKER = "/dashboard/hooks/"
+
+    def add_or_update_hook(hook_type: str, script_path: str, timeout: int = 5000, metadata: dict | None = None):
+        """Add or update a dashboard hook without removing other hooks."""
+        if hook_type not in settings["hooks"]:
+            settings["hooks"][hook_type] = []
+
+        hook_list = settings["hooks"][hook_type]
+
+        # Find existing dashboard hook entry
+        dashboard_entry_idx = None
+        for i, entry in enumerate(hook_list):
+            if "hooks" in entry:
+                for hook in entry["hooks"]:
+                    if hook.get("type") == "command" and DASHBOARD_MARKER in hook.get("command", ""):
+                        dashboard_entry_idx = i
+                        break
+            if dashboard_entry_idx is not None:
+                break
+
+        # Create the new hook entry
+        new_entry = {
             "hooks": [
                 {
                     "type": "command",
-                    "command": str(session_start_script),
-                    "timeout": 5000,
+                    "command": script_path,
+                    "timeout": timeout,
                 }
             ]
         }
-    ]
+        if metadata:
+            new_entry["metadata"] = metadata
 
-    # Add Stop hook with conversation data
-    settings["hooks"]["Stop"] = [
-        {
-            "hooks": [
-                {
-                    "type": "command",
-                    "command": str(stop_script),
-                    "timeout": 5000,
-                }
-            ],
-            "metadata": {
-                "includeConversationData": True,
-            },
-        }
-    ]
+        if dashboard_entry_idx is not None:
+            # Update existing dashboard hook
+            hook_list[dashboard_entry_idx] = new_entry
+        else:
+            # Add new dashboard hook
+            hook_list.append(new_entry)
 
-    # Add PreToolUse hook (optional - only if command exists)
+    # Add/update SessionStart hook
+    add_or_update_hook("SessionStart", str(session_start_script))
+
+    # Add/update Stop hook with conversation data
+    add_or_update_hook("Stop", str(stop_script), metadata={"includeConversationData": True})
+
+    # Add/update PreToolUse hook (optional)
     if pre_tool_path:
-        settings["hooks"]["PreToolUse"] = [
-            {
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": str(pre_tool_script),
-                        "timeout": 5000,
-                    }
-                ]
-            }
-        ]
+        add_or_update_hook("PreToolUse", str(pre_tool_script))
 
-    # Add PostToolUse hook (optional - only if command exists)
+    # Add/update PostToolUse hook (optional)
     if post_tool_path:
-        settings["hooks"]["PostToolUse"] = [
-            {
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": str(post_tool_script),
-                        "timeout": 5000,
-                    }
-                ]
-            }
-        ]
+        add_or_update_hook("PostToolUse", str(post_tool_script))
 
     # Write settings
     settings_file.parent.mkdir(parents=True, exist_ok=True)
