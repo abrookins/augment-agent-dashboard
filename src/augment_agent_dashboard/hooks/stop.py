@@ -277,7 +277,6 @@ def run_hook() -> None:
                 sys.stderr.write(f"Processing queued message: {next_msg.content[:50]}...\n")
 
                 # Convert queued message to user message
-                from augment_agent_dashboard.models import SessionMessage
                 next_msg.role = "user"
                 store.upsert_session(session)
 
