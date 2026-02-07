@@ -136,6 +136,17 @@ def run_hook() -> None:
     except json.JSONDecodeError:
         pass
 
+    # Debug: log the full hook input to understand available fields
+    debug_log_path = Path.home() / ".augment" / "dashboard" / "hook_debug.log"
+    try:
+        with open(debug_log_path, "a") as f:
+            import datetime
+            f.write(f"\n\n=== Stop Hook Input @ {datetime.datetime.now().isoformat()} ===\n")
+            f.write(json.dumps(hook_input, indent=2, default=str))
+            f.write("\n")
+    except Exception as e:
+        sys.stderr.write(f"Debug log error: {e}\n")
+
     # Extract workspace and conversation info
     workspace_roots = hook_input.get("workspace_roots", [])
     conversation_id = hook_input.get("conversation_id", "unknown")
@@ -167,11 +178,17 @@ def run_hook() -> None:
         existing = store.get_session(session_id)
         if existing:
             # Add messages to existing session
+            # Check if user message already exists (may have been added by UI)
             if user_prompt:
-                store.add_message(
-                    session_id,
-                    SessionMessage(role="user", content=user_prompt),
+                user_msg_exists = any(
+                    m.role == "user" and m.content.strip() == user_prompt.strip()
+                    for m in existing.messages[-5:]  # Check recent messages only
                 )
+                if not user_msg_exists:
+                    store.add_message(
+                        session_id,
+                        SessionMessage(role="user", content=user_prompt),
+                    )
             if agent_text:
                 store.add_message(
                     session_id,

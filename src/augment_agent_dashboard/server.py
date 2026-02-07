@@ -130,6 +130,8 @@ async def post_message(
     background_tasks: BackgroundTasks,
 ):
     """Post a message to a session - injects it in real-time via auggie subprocess."""
+    from augment_agent_dashboard.models import SessionMessage, SessionStatus
+
     store = get_store()
     session = store.get_session(session_id)
 
@@ -141,6 +143,13 @@ async def post_message(
 
     if not session.workspace_root:
         raise HTTPException(status_code=400, detail="Session has no workspace root")
+
+    # Immediately add the user message to the session so it shows in UI
+    user_msg = SessionMessage(role="user", content=message.strip())
+    store.add_message(session_id, user_msg)
+
+    # Mark session as active
+    store.update_session_status(session_id, SessionStatus.ACTIVE)
 
     # Spawn auggie in background to inject the message
     background_tasks.add_task(
