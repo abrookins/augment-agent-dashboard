@@ -22,12 +22,14 @@ def get_workspace_name(workspace_root: str | None) -> str:
     return Path(workspace_root).name
 
 
-def get_session_id(workspace_root: str | None, conversation_id: str) -> str:
-    """Generate a session ID."""
-    if workspace_root:
-        workspace_name = Path(workspace_root).name
-        return f"dashboard-{workspace_name}-{conversation_id[:8]}"
-    return f"dashboard-{conversation_id}"
+def get_session_id(conversation_id: str) -> str:
+    """Use conversation_id as session ID for consistency with auggie --resume.
+
+    Always use the raw conversation_id (UUID) as the session_id.
+    This ensures that when we resume a session with `auggie --resume <conversation_id>`,
+    the hooks will find/update the correct session.
+    """
+    return conversation_id
 
 
 def run_hook() -> None:
@@ -70,7 +72,7 @@ def run_hook() -> None:
     conversation_id = hook_input.get("conversation_id", "unknown")
     workspace_root = get_workspace_root(workspace_roots)
     workspace_name = get_workspace_name(workspace_root)
-    session_id = get_session_id(workspace_root, conversation_id)
+    session_id = get_session_id(conversation_id)
 
     log(f"  Session: {session_id}, workspace: {workspace_root}")
 

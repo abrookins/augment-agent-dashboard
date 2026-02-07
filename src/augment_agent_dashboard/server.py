@@ -53,10 +53,19 @@ async def spawn_auggie_message(conversation_id: str, workspace_root: str, messag
     """Spawn auggie subprocess to inject a message into a session.
 
     Returns True if successful, False otherwise.
+
+    Note: This spawns a NEW auggie process with --resume. If another auggie
+    process is already running for this conversation, behavior may vary.
     """
+    import logging
+    logger = logging.getLogger(__name__)
+
     auggie_path = shutil.which("auggie")
     if not auggie_path:
+        logger.warning("auggie not found in PATH")
         return False
+
+    logger.info(f"Spawning auggie --resume {conversation_id} in {workspace_root}")
 
     try:
         process = await asyncio.create_subprocess_exec(
@@ -67,9 +76,16 @@ async def spawn_auggie_message(conversation_id: str, workspace_root: str, messag
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        await process.wait()
-        return process.returncode == 0
-    except Exception:
+        stdout, stderr = await process.communicate()
+
+        if process.returncode != 0:
+            logger.error(f"auggie failed: rc={process.returncode}, stderr={stderr.decode()[:500]}")
+            return False
+
+        logger.info(f"auggie completed successfully for {conversation_id}")
+        return True
+    except Exception as e:
+        logger.exception(f"Error spawning auggie: {e}")
         return False
 
 
@@ -324,6 +340,124 @@ async def poll_notifications(since: str = ""):
         return {"notifications": []}
     notifications = [n for n in _pending_notifications if n["id"] > since]
     return {"notifications": notifications}
+
+
+@app.get("/manifest.json")
+async def get_manifest():
+    """Serve the PWA manifest."""
+    return {
+        "name": "Augment Agent Dashboard",
+        "short_name": "Augment",
+        "description": "Monitor and control Augment agent sessions",
+        "start_url": "/",
+        "display": "standalone",
+        "background_color": "#1a1a2e",
+        "theme_color": "#6366f1",
+        "icons": [
+            {
+                "src": "/icon-192.png",
+                "sizes": "192x192",
+                "type": "image/png"
+            },
+            {
+                "src": "/icon-512.png",
+                "sizes": "512x512",
+                "type": "image/png"
+            }
+        ]
+    }
+
+
+@app.get("/sw.js")
+async def get_service_worker():
+    """Serve the service worker JavaScript."""
+    from fastapi.responses import Response
+    sw_code = """
+// Service Worker for Augment Agent Dashboard PWA
+const CACHE_NAME = 'augment-dashboard-v1';
+
+self.addEventListener('install', (event) => {
+    self.skipWaiting();
+});
+
+self.addEventListener('activate', (event) => {
+    event.waitUntil(clients.claim());
+});
+
+// Handle push notifications
+self.addEventListener('push', (event) => {
+    let data = { title: 'Augment Agent', body: 'Agent turn complete' };
+
+    if (event.data) {
+        try {
+            data = event.data.json();
+        } catch (e) {
+            data.body = event.data.text();
+        }
+    }
+
+    const options = {
+        body: data.body,
+        icon: '/icon-192.png',
+        badge: '/icon-192.png',
+        tag: data.tag || 'augment-notification',
+        requireInteraction: true,
+        data: { url: data.url || '/' }
+    };
+
+    event.waitUntil(
+        self.registration.showNotification(data.title, options)
+    );
+});
+
+// Handle notification click
+self.addEventListener('notificationclick', (event) => {
+    event.notification.close();
+
+    const url = event.notification.data?.url || '/';
+
+    event.waitUntil(
+        clients.matchAll({ type: 'window', includeUncontrolled: true })
+            .then((clientList) => {
+                // Try to focus an existing window
+                for (const client of clientList) {
+                    if (client.url.includes(self.location.origin) && 'focus' in client) {
+                        client.navigate(url);
+                        return client.focus();
+                    }
+                }
+                // Open a new window if none exists
+                if (clients.openWindow) {
+                    return clients.openWindow(url);
+                }
+            })
+    );
+});
+"""
+    return Response(content=sw_code, media_type="application/javascript")
+
+
+@app.get("/icon-192.png")
+async def get_icon_192():
+    """Serve a simple SVG icon as PNG placeholder."""
+    from fastapi.responses import Response
+    # Simple robot emoji as SVG converted to a basic icon
+    svg = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192">
+        <rect width="192" height="192" fill="#6366f1" rx="32"/>
+        <text x="96" y="130" font-size="100" text-anchor="middle">🤖</text>
+    </svg>'''
+    return Response(content=svg.encode(), media_type="image/svg+xml")
+
+
+@app.get("/icon-512.png")
+async def get_icon_512():
+    """Serve a simple SVG icon as PNG placeholder."""
+    from fastapi.responses import Response
+    svg = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+        <rect width="512" height="512" fill="#6366f1" rx="64"/>
+        <text x="256" y="340" font-size="280" text-anchor="middle">🤖</text>
+    </svg>'''
+    return Response(content=svg.encode(), media_type="image/svg+xml")
 
 
 # HTML rendering functions (inline for simplicity)
@@ -709,18 +843,67 @@ def get_base_styles(dark_mode: str | None) -> str:
 
 
 def _get_notification_script() -> str:
-    """Get JavaScript for browser notifications."""
+    """Get JavaScript for browser notifications with PWA support for iOS."""
     return """
-        // Browser notification support
+        // Browser notification support with PWA for iOS
         const banner = document.getElementById('notification-banner');
         const bannerText = document.getElementById('notification-text');
         let lastNotificationId = new Date().toISOString();
+        let swRegistration = null;
+
+        // Detect iOS
+        function isIOS() {
+            return /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+                   (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+        }
+
+        // Detect if running as installed PWA
+        function isPWA() {
+            return window.matchMedia('(display-mode: standalone)').matches ||
+                   window.navigator.standalone === true;
+        }
 
         function checkNotificationSupport() {
             return 'Notification' in window;
         }
 
+        // Register service worker
+        async function registerServiceWorker() {
+            if ('serviceWorker' in navigator) {
+                try {
+                    swRegistration = await navigator.serviceWorker.register('/sw.js');
+                    console.log('Service worker registered');
+                    return true;
+                } catch (e) {
+                    console.error('Service worker registration failed:', e);
+                    return false;
+                }
+            }
+            return false;
+        }
+
         function updateBanner() {
+            // iOS but not installed as PWA
+            if (isIOS() && !isPWA()) {
+                banner.style.display = 'block';
+                banner.style.background = 'var(--accent)';
+                bannerText.innerHTML = '📱 <strong>Add to Home Screen</strong> for notifications: tap <span style="font-size:1.2em">⎙</span> then "Add to Home Screen"';
+                banner.onclick = null;
+                banner.style.cursor = 'default';
+                return;
+            }
+
+            // iOS PWA - can use notifications
+            if (isIOS() && isPWA()) {
+                if (!checkNotificationSupport()) {
+                    banner.style.display = 'block';
+                    banner.style.background = 'var(--text-secondary)';
+                    bannerText.textContent = 'Notifications not available - try updating iOS';
+                    return;
+                }
+            }
+
+            // Standard notification flow
             if (!checkNotificationSupport()) {
                 banner.style.display = 'none';
                 return;
@@ -728,8 +911,9 @@ def _get_notification_script() -> str:
 
             if (Notification.permission === 'default') {
                 banner.style.display = 'block';
-                bannerText.textContent = 'Click to enable browser notifications for agent alerts';
+                bannerText.textContent = '🔔 Click to enable browser notifications for agent alerts';
                 banner.onclick = requestPermission;
+                banner.style.cursor = 'pointer';
             } else if (Notification.permission === 'granted') {
                 banner.style.display = 'block';
                 banner.style.background = 'var(--status-active)';
@@ -748,6 +932,9 @@ def _get_notification_script() -> str:
         }
 
         async function requestPermission() {
+            // Register service worker first for PWA support
+            await registerServiceWorker();
+
             const permission = await Notification.requestPermission();
             updateBanner();
         }
@@ -769,22 +956,35 @@ def _get_notification_script() -> str:
 
         function showNotification(n) {
             if (Notification.permission !== 'granted') return;
-            const notification = new Notification(n.title, {
-                body: n.body,
-                icon: '🤖',
-                tag: n.id,
-                requireInteraction: true
-            });
-            if (n.url) {
-                notification.onclick = () => {
-                    window.focus();
-                    window.location.href = n.url;
-                };
+
+            // Use service worker notification if available (better for PWA)
+            if (swRegistration && swRegistration.showNotification) {
+                swRegistration.showNotification(n.title, {
+                    body: n.body,
+                    icon: '/icon-192.png',
+                    tag: n.id,
+                    requireInteraction: true,
+                    data: { url: n.url }
+                });
+            } else {
+                // Fallback to regular notification
+                const notification = new Notification(n.title, {
+                    body: n.body,
+                    icon: '/icon-192.png',
+                    tag: n.id,
+                    requireInteraction: true
+                });
+                if (n.url) {
+                    notification.onclick = () => {
+                        window.focus();
+                        window.location.href = n.url;
+                    };
+                }
             }
         }
 
         // Initialize
-        updateBanner();
+        registerServiceWorker().then(() => updateBanner());
     """
 
 
@@ -855,6 +1055,12 @@ def render_dashboard(sessions: list, dark_mode: str | None, sort_by: str = "rece
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Augment Agent Dashboard</title>
         <meta http-equiv="refresh" content="10">
+        <link rel="manifest" href="/manifest.json">
+        <meta name="apple-mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+        <meta name="apple-mobile-web-app-title" content="Augment">
+        <link rel="apple-touch-icon" href="/icon-192.png">
+        <meta name="theme-color" content="#6366f1">
         {styles}
     </head>
     <body>
@@ -917,6 +1123,12 @@ def render_config_page(dark_mode: str | None, loop_prompts: dict[str, str], conf
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Configuration - Augment Dashboard</title>
+        <link rel="manifest" href="/manifest.json">
+        <meta name="apple-mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+        <meta name="apple-mobile-web-app-title" content="Augment">
+        <link rel="apple-touch-icon" href="/icon-192.png">
+        <meta name="theme-color" content="#6366f1">
         {styles}
         <style>
             .prompt-card {{
@@ -1018,6 +1230,32 @@ def _format_elapsed_time(started_at: datetime | None) -> str:
         return f"{seconds}s"
 
 
+def _render_message_form(session) -> str:
+    """Render the message form, disabled if agent is busy."""
+    from augment_agent_dashboard.models import SessionStatus
+
+    if session.status == SessionStatus.ACTIVE:
+        return f'''
+            <div style="background:var(--status-active);color:#000;padding:12px;border-radius:8px;margin-bottom:10px;">
+                ⏳ Agent is currently working. Wait for it to finish before sending a new message.
+            </div>
+            <form method="POST" action="/session/{session.session_id}/message">
+                <textarea id="message-input" name="message" placeholder="Agent is busy..." disabled style="opacity:0.5;"></textarea>
+                <button type="submit" disabled style="opacity:0.5;cursor:not-allowed;">Send Message</button>
+            </form>
+        '''
+    else:
+        return f'''
+            <p style="color: var(--text-secondary); margin-bottom: 10px;">
+                This will spawn a new auggie process to handle your message in this session.
+            </p>
+            <form method="POST" action="/session/{session.session_id}/message">
+                <textarea id="message-input" name="message" placeholder="Type a message for the agent..."></textarea>
+                <button type="submit">Send Message</button>
+            </form>
+        '''
+
+
 def _render_loop_controls(session, loop_prompts: dict[str, str]) -> str:
     """Render the loop control UI section."""
     if session.loop_enabled:
@@ -1095,6 +1333,12 @@ def render_session_detail(session, dark_mode: str | None, loop_prompts: dict[str
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>{session.workspace_name} - Augment Dashboard</title>
+        <link rel="manifest" href="/manifest.json">
+        <meta name="apple-mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+        <meta name="apple-mobile-web-app-title" content="Augment">
+        <link rel="apple-touch-icon" href="/icon-192.png">
+        <meta name="theme-color" content="#6366f1">
         {styles}
     </head>
     <body>
@@ -1133,13 +1377,7 @@ def render_session_detail(session, dark_mode: str | None, loop_prompts: dict[str
 
         <div class="message-form">
             <h3>Send Message to Agent</h3>
-            <p style="color: var(--text-secondary); margin-bottom: 10px;">
-                This will spawn a new auggie process to handle your message in this session.
-            </p>
-            <form method="POST" action="/session/{session.session_id}/message">
-                <textarea id="message-input" name="message" placeholder="Type a message for the agent..."></textarea>
-                <button type="submit">Send Message</button>
-            </form>
+            {_render_message_form(session)}
         </div>
 
         <script>
