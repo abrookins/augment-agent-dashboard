@@ -15,6 +15,46 @@ class SessionStatus(str, Enum):
 
 
 @dataclass
+class LoopConfig:
+    """Configuration for a loop prompt.
+
+    The prompt should give clear instructions to the LLM about what work to do
+    and explain what the end condition is. The end_condition is a string that
+    the LLM should include in its response when it believes the work is complete.
+
+    Example:
+        prompt: "Reach 100% test coverage. If you have truly reached 100% test
+                 coverage of ALL code, say 'LOOP_COMPLETE: 100% coverage achieved.'"
+        end_condition: "LOOP_COMPLETE: 100% coverage achieved."
+    """
+
+    prompt: str
+    end_condition: str
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "prompt": self.prompt,
+            "end_condition": self.end_condition,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict | str) -> "LoopConfig":
+        """Create from dictionary or legacy string format.
+
+        Supports backward compatibility with old configs that stored
+        prompts as plain strings.
+        """
+        if isinstance(data, str):
+            # Legacy format: just a string prompt, no end condition
+            return cls(prompt=data, end_condition="")
+        return cls(
+            prompt=data.get("prompt", ""),
+            end_condition=data.get("end_condition", ""),
+        )
+
+
+@dataclass
 class SessionMessage:
     """A message in a session conversation."""
 

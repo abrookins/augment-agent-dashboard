@@ -238,18 +238,46 @@ def run_hook() -> None:
         session = store.get_session(session_id)
         if session and session.loop_enabled:
             max_iterations = config.get("max_loop_iterations", 50)
-            if session.loop_count < max_iterations:
+
+            # Get loop config from config using the session's selected prompt name
+            loop_prompts = config.get("loop_prompts", {})
+            prompt_name = session.loop_prompt_name
+            default_config = {
+                "prompt": "Continue working. When done, say 'LOOP_COMPLETE: Task finished.'",
+                "end_condition": "LOOP_COMPLETE: Task finished.",
+            }
+
+            # Get the loop config - handle both new format (dict) and legacy format (string)
+            loop_config = loop_prompts.get(prompt_name, default_config) if prompt_name else default_config
+            if isinstance(loop_config, str):
+                # Legacy format: just a string prompt, no end condition
+                loop_prompt = loop_config
+                end_condition = ""
+            else:
+                loop_prompt = loop_config.get("prompt", default_config["prompt"])
+                end_condition = loop_config.get("end_condition", "")
+
+            # Check if the agent's response contains the end condition
+            end_condition_met = False
+            if end_condition and agent_text:
+                end_condition_met = end_condition in agent_text
+
+            if end_condition_met:
+                # End condition met - stop the loop
+                session.loop_enabled = False
+                store.upsert_session(session)
+                send_notification(
+                    "Loop Complete",
+                    f"End condition met after {session.loop_count} iterations",
+                    workspace_name,
+                    session_id,
+                    port=config.get("port", 9000),
+                    sound=config.get("notification_sound", True),
+                )
+            elif session.loop_count < max_iterations:
                 # Increment loop count
                 session.loop_count += 1
                 store.upsert_session(session)
-
-                # Get loop prompt from config using the session's selected prompt name
-                loop_prompts = config.get("loop_prompts", {})
-                prompt_name = session.loop_prompt_name
-                default_prompt = "Did you use TDD, reach 100% test coverage, and verify quality at .8 or above with mfcqi? If not, continue working. If choices must be made, choose wisely."
-                loop_prompt = loop_prompts.get(prompt_name, default_prompt) if prompt_name else default_prompt
-
-                # Quality loop iteration logged
 
                 # Spawn auggie with the loop prompt
                 spawn_loop_message(conversation_id, workspace_root, loop_prompt)
@@ -257,7 +285,6 @@ def run_hook() -> None:
                 # Max iterations reached, disable loop
                 session.loop_enabled = False
                 store.upsert_session(session)
-                # Quality loop reached max iterations
                 send_notification(
                     "Quality Loop Complete",
                     f"Reached {max_iterations} iterations",

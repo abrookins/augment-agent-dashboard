@@ -36,14 +36,27 @@ def get_store() -> SessionStore:
     return SessionStore()
 
 
-def _get_loop_prompts() -> dict[str, str]:
-    """Get loop prompts from config file."""
+def _get_loop_prompts() -> dict[str, dict[str, str]]:
+    """Get loop prompts from config file.
+
+    Returns a dict mapping prompt names to their config (prompt and end_condition).
+    Handles backward compatibility with old configs that stored prompts as strings.
+    """
     import json
     config_path = Path.home() / ".augment" / "dashboard" / "config.json"
     if config_path.exists():
         try:
             config = json.loads(config_path.read_text())
-            return config.get("loop_prompts", DEFAULT_LOOP_PROMPTS)
+            raw_prompts = config.get("loop_prompts", DEFAULT_LOOP_PROMPTS)
+            # Handle backward compatibility: convert string prompts to dict format
+            normalized: dict[str, dict[str, str]] = {}
+            for name, value in raw_prompts.items():
+                if isinstance(value, str):
+                    # Legacy format: just a string prompt
+                    normalized[name] = {"prompt": value, "end_condition": ""}
+                else:
+                    normalized[name] = value
+            return normalized
         except Exception:
             pass
     return DEFAULT_LOOP_PROMPTS.copy()
@@ -304,11 +317,15 @@ async def config_page(request: Request):
 
 
 @app.post("/config/prompts/add")
-async def add_prompt(name: Annotated[str, Form()], prompt: Annotated[str, Form()]):
-    """Add a new loop prompt."""
+async def add_prompt(
+    name: Annotated[str, Form()],
+    prompt: Annotated[str, Form()],
+    end_condition: Annotated[str, Form()] = "",
+):
+    """Add a new loop prompt with optional end condition."""
     config = _get_full_config()
     loop_prompts = config.get("loop_prompts", DEFAULT_LOOP_PROMPTS.copy())
-    loop_prompts[name] = prompt
+    loop_prompts[name] = {"prompt": prompt, "end_condition": end_condition}
     config["loop_prompts"] = loop_prompts
     _save_full_config(config)
     return RedirectResponse(url="/config", status_code=303)
@@ -327,11 +344,15 @@ async def delete_prompt(name: Annotated[str, Form()]):
 
 
 @app.post("/config/prompts/edit")
-async def edit_prompt(name: Annotated[str, Form()], prompt: Annotated[str, Form()]):
-    """Edit an existing loop prompt."""
+async def edit_prompt(
+    name: Annotated[str, Form()],
+    prompt: Annotated[str, Form()],
+    end_condition: Annotated[str, Form()] = "",
+):
+    """Edit an existing loop prompt and end condition."""
     config = _get_full_config()
     loop_prompts = config.get("loop_prompts", DEFAULT_LOOP_PROMPTS.copy())
-    loop_prompts[name] = prompt
+    loop_prompts[name] = {"prompt": prompt, "end_condition": end_condition}
     config["loop_prompts"] = loop_prompts
     _save_full_config(config)
     return RedirectResponse(url="/config", status_code=303)
@@ -810,6 +831,65 @@ def get_base_styles(dark_mode: str | None) -> str:
         .btn-reset {{ background: var(--text-secondary); color: #fff; }}
         .btn-delete {{ background: #dc2626; color: white; }}
         .btn-queue {{ background: #8b5cf6; color: white; }}
+        .loop-controls-container {{
+            margin-top: 8px;
+        }}
+        .loop-end-condition {{
+            margin-top: 8px;
+            padding: 8px 12px;
+            background: rgba(99, 102, 241, 0.1);
+            border-radius: 6px;
+            border-left: 3px solid var(--accent);
+        }}
+        .end-condition-label {{
+            color: var(--text-secondary);
+            font-size: 0.85em;
+            display: block;
+            margin-bottom: 4px;
+        }}
+        .end-condition-text {{
+            font-family: 'SF Mono', Monaco, 'Courier New', monospace;
+            font-size: 0.9em;
+            color: var(--accent);
+            background: var(--bg-primary);
+            padding: 4px 8px;
+            border-radius: 4px;
+            display: inline-block;
+            word-break: break-word;
+        }}
+        .loop-prompt-details {{
+            margin-top: 8px;
+        }}
+        .loop-prompt-details summary {{
+            cursor: pointer;
+            color: var(--text-secondary);
+            font-size: 0.85em;
+            padding: 4px 0;
+        }}
+        .loop-prompt-details summary:hover {{
+            color: var(--accent);
+        }}
+        .loop-prompt-text {{
+            margin-top: 8px;
+            padding: 10px;
+            background: var(--bg-primary);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            font-size: 0.85em;
+            color: var(--text-secondary);
+            white-space: pre-wrap;
+            word-break: break-word;
+            max-height: 200px;
+            overflow-y: auto;
+        }}
+        .loop-prompt-preview {{
+            margin-top: 8px;
+            padding: 10px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            font-size: 0.85em;
+        }}
         .message.queued {{
             border-left: 3px solid #8b5cf6;
             background: linear-gradient(90deg, rgba(139, 92, 246, 0.1) 0%, transparent 100%);
@@ -1153,15 +1233,21 @@ def render_dashboard(sessions: list, dark_mode: str | None, sort_by: str = "rece
     """
 
 
-def render_config_page(dark_mode: str | None, loop_prompts: dict[str, str], config: dict) -> str:
+def render_config_page(dark_mode: str | None, loop_prompts: dict[str, dict[str, str]], config: dict) -> str:
     """Render the configuration page HTML."""
     styles = get_base_styles(dark_mode)
 
     # Build prompt list
     prompts_html = ""
-    for name, prompt in loop_prompts.items():
+    for name, prompt_config in loop_prompts.items():
         escaped_name = html.escape(name)
-        escaped_prompt = html.escape(prompt)
+        # Handle both new format (dict) and legacy format (string)
+        if isinstance(prompt_config, str):
+            escaped_prompt = html.escape(prompt_config)
+            escaped_condition = ""
+        else:
+            escaped_prompt = html.escape(prompt_config.get("prompt", ""))
+            escaped_condition = html.escape(prompt_config.get("end_condition", ""))
         prompts_html += f'''
         <div class="prompt-card">
             <div class="prompt-header">
@@ -1173,7 +1259,10 @@ def render_config_page(dark_mode: str | None, loop_prompts: dict[str, str], conf
             </div>
             <form method="POST" action="/config/prompts/edit" class="prompt-edit-form">
                 <input type="hidden" name="name" value="{escaped_name}">
-                <textarea name="prompt" rows="3">{escaped_prompt}</textarea>
+                <label class="field-label">Prompt (instructions for the LLM):</label>
+                <textarea name="prompt" rows="4">{escaped_prompt}</textarea>
+                <label class="field-label">End Condition (text that stops the loop when found in response):</label>
+                <input type="text" name="end_condition" value="{escaped_condition}" placeholder="e.g., LOOP_COMPLETE: Task finished.">
                 <button type="submit" class="btn-enable" style="margin-top:8px;">Save</button>
             </form>
         </div>
@@ -1207,7 +1296,8 @@ def render_config_page(dark_mode: str | None, loop_prompts: dict[str, str], conf
                 align-items: center;
                 margin-bottom: 8px;
             }}
-            .prompt-edit-form textarea {{
+            .prompt-edit-form textarea,
+            .prompt-edit-form input[type="text"] {{
                 width: 100%;
                 padding: 8px;
                 border: 1px solid var(--border-color);
@@ -1217,6 +1307,20 @@ def render_config_page(dark_mode: str | None, loop_prompts: dict[str, str], conf
                 font-family: inherit;
                 font-size: 14px;
                 resize: vertical;
+                margin-bottom: 8px;
+            }}
+            .prompt-edit-form input[type="text"] {{
+                resize: none;
+            }}
+            .field-label {{
+                display: block;
+                font-size: 0.85em;
+                color: var(--text-secondary);
+                margin-bottom: 4px;
+                margin-top: 8px;
+            }}
+            .field-label:first-of-type {{
+                margin-top: 0;
             }}
             .add-prompt-form {{
                 background: var(--bg-secondary);
@@ -1256,7 +1360,8 @@ def render_config_page(dark_mode: str | None, loop_prompts: dict[str, str], conf
 
         <h2>Loop Prompts</h2>
         <p style="color:var(--text-secondary);margin-bottom:15px;">
-            These prompts are used for the quality loop feature. Select one when enabling a loop on a session.
+            Configure loop prompts with end conditions. The prompt tells the LLM what to do and should explain
+            the end condition. When the LLM includes the end condition text in its response, the loop stops.
         </p>
 
         {prompts_html}
@@ -1264,8 +1369,12 @@ def render_config_page(dark_mode: str | None, loop_prompts: dict[str, str], conf
         <div class="add-prompt-form">
             <h3>Add New Prompt</h3>
             <form method="POST" action="/config/prompts/add">
+                <label class="field-label">Name:</label>
                 <input type="text" name="name" placeholder="Prompt name (e.g., 'Security Review')" required>
-                <textarea name="prompt" placeholder="Enter the prompt text..." required></textarea>
+                <label class="field-label">Prompt (instructions for the LLM):</label>
+                <textarea name="prompt" placeholder="Enter instructions. Include what the LLM should say when done, e.g., 'When finished, say LOOP_COMPLETE: Security review done.'" required></textarea>
+                <label class="field-label">End Condition (text that stops the loop):</label>
+                <input type="text" name="end_condition" placeholder="e.g., LOOP_COMPLETE: Security review done.">
                 <button type="submit" class="btn-enable" style="width:100%;">Add Prompt</button>
             </form>
         </div>
@@ -1326,48 +1435,95 @@ def _render_message_form(session) -> str:
         '''
 
 
-def _render_loop_controls(session, loop_prompts: dict[str, str]) -> str:
+def _render_loop_controls(session, loop_prompts: dict[str, dict[str, str]]) -> str:
     """Render the loop control UI section."""
     if session.loop_enabled:
         elapsed = _format_elapsed_time(session.loop_started_at)
         prompt_name = session.loop_prompt_name or "Unknown"
+
+        # Get the end condition for the active loop
+        loop_config = loop_prompts.get(prompt_name, {})
+        if isinstance(loop_config, str):
+            end_condition = ""
+            prompt_text = loop_config
+        else:
+            end_condition = loop_config.get("end_condition", "")
+            prompt_text = loop_config.get("prompt", "")
+
+        # Build end condition display
+        end_condition_html = ""
+        if end_condition:
+            escaped_condition = html.escape(end_condition)
+            end_condition_html = f'''
+                <div class="loop-end-condition">
+                    <span class="end-condition-label">🎯 Stops when response contains:</span>
+                    <code class="end-condition-text">{escaped_condition}</code>
+                </div>
+            '''
+
+        # Build prompt preview (collapsed by default)
+        prompt_preview_html = ""
+        if prompt_text:
+            escaped_prompt = html.escape(prompt_text)
+            prompt_preview_html = f'''
+                <details class="loop-prompt-details">
+                    <summary>📝 View prompt</summary>
+                    <div class="loop-prompt-text">{escaped_prompt}</div>
+                </details>
+            '''
+
         return f'''
-            <div class="loop-controls">
-                <span style="color:var(--status-active);font-weight:bold;">
-                    🔄 {html.escape(prompt_name)}
-                </span>
-                <span style="color:var(--text-secondary);">
-                    {session.loop_count} iterations, {elapsed}
-                </span>
-                <form method="POST" action="/session/{session.session_id}/loop/pause">
-                    <button type="submit" class="btn-pause">⏸ Pause</button>
-                </form>
-                <form method="POST" action="/session/{session.session_id}/loop/reset">
-                    <button type="submit" class="btn-reset">↺ Reset</button>
-                </form>
+            <div class="loop-controls-container">
+                <div class="loop-controls">
+                    <span style="color:var(--status-active);font-weight:bold;">
+                        🔄 {html.escape(prompt_name)}
+                    </span>
+                    <span style="color:var(--text-secondary);">
+                        {session.loop_count} iterations, {elapsed}
+                    </span>
+                    <form method="POST" action="/session/{session.session_id}/loop/pause">
+                        <button type="submit" class="btn-pause">⏸ Pause</button>
+                    </form>
+                    <form method="POST" action="/session/{session.session_id}/loop/reset">
+                        <button type="submit" class="btn-reset">↺ Reset</button>
+                    </form>
+                </div>
+                {end_condition_html}
+                {prompt_preview_html}
             </div>
         '''
     else:
-        # Build dropdown options
-        options = "".join(
-            f'<option value="{html.escape(name)}">{html.escape(name)}</option>'
-            for name in loop_prompts.keys()
-        )
+        # Build dropdown options with title tooltips showing prompt preview
+        options_html = ""
+        for name, config in loop_prompts.items():
+            escaped_name = html.escape(name)
+            if isinstance(config, str):
+                tooltip = config[:100] + "..." if len(config) > 100 else config
+            else:
+                prompt = config.get("prompt", "")
+                end_cond = config.get("end_condition", "")
+                tooltip = f"Prompt: {prompt[:80]}..." if len(prompt) > 80 else f"Prompt: {prompt}"
+                if end_cond:
+                    tooltip += f"\n\nStops when: {end_cond}"
+            escaped_tooltip = html.escape(tooltip)
+            options_html += f'<option value="{escaped_name}" title="{escaped_tooltip}">{escaped_name}</option>'
+
         return f'''
             <div class="loop-controls">
                 <span style="color:var(--text-secondary);">Loop Paused</span>
                 <form method="POST" action="/session/{session.session_id}/loop/enable">
-                    <select name="prompt_name">{options}</select>
+                    <select name="prompt_name" id="loop-prompt-select">{options_html}</select>
                     <button type="submit" class="btn-enable">▶ Enable</button>
                 </form>
                 <form method="POST" action="/session/{session.session_id}/loop/reset">
                     <button type="submit" class="btn-reset">↺ Reset</button>
                 </form>
             </div>
+            <div id="loop-prompt-preview" class="loop-prompt-preview" style="display:none;"></div>
         '''
 
 
-def render_session_detail(session, dark_mode: str | None, loop_prompts: dict[str, str]) -> str:
+def render_session_detail(session, dark_mode: str | None, loop_prompts: dict[str, dict[str, str]]) -> str:
     """Render the session detail HTML."""
     styles = get_base_styles(dark_mode)
 
@@ -1497,28 +1653,59 @@ def render_session_detail(session, dark_mode: str | None, loop_prompts: dict[str
     """
 
 
-DEFAULT_LOOP_PROMPTS = {
-    "TDD Quality": "Did you use TDD, reach 100% test coverage, and verify quality at .8 or above with mfcqi? If not, continue working. If choices must be made, choose wisely.",
-    "Code Review": "Review the code you just wrote. Look for bugs, security issues, performance problems, and style violations. Fix any issues you find.",
-    "Refactor": "Look at the code you just wrote. Can it be simplified, made more readable, or better organized? Refactor if so.",
-    "Documentation": "Review the code you just wrote. Is it well-documented? Add or improve docstrings, comments, and type hints as needed.",
-    "Test Coverage": "Check test coverage for the code you just wrote. Write additional tests to cover edge cases and error conditions.",
+DEFAULT_LOOP_PROMPTS: dict[str, dict[str, str]] = {
+    "TDD Quality": {
+        "prompt": "Continue working on this task using TDD. Write tests first, then implement code to pass them. Verify code quality with mfcqi (target score >= 0.8). When you have achieved 100% test coverage AND mfcqi score >= 0.8, respond with exactly: 'LOOP_COMPLETE: TDD quality goals achieved.'",
+        "end_condition": "LOOP_COMPLETE: TDD quality goals achieved.",
+    },
+    "Code Review": {
+        "prompt": "Review the code you just wrote. Look for bugs, security issues, performance problems, and style violations. Fix any issues you find. When you have reviewed ALL code and fixed ALL issues, respond with exactly: 'LOOP_COMPLETE: Code review finished.'",
+        "end_condition": "LOOP_COMPLETE: Code review finished.",
+    },
+    "Refactor": {
+        "prompt": "Analyze the code you just wrote for opportunities to improve. Look for: duplicated code, overly complex logic, poor naming, violation of SOLID principles. Refactor where beneficial. When the code is as clean as it can reasonably be, respond with exactly: 'LOOP_COMPLETE: Refactoring finished.'",
+        "end_condition": "LOOP_COMPLETE: Refactoring finished.",
+    },
+    "Documentation": {
+        "prompt": "Review the code you just wrote for documentation quality. Add or improve: docstrings for all public functions/classes, inline comments for complex logic, type hints for all parameters and return values. When documentation is complete, respond with exactly: 'LOOP_COMPLETE: Documentation complete.'",
+        "end_condition": "LOOP_COMPLETE: Documentation complete.",
+    },
+    "Test Coverage": {
+        "prompt": "Analyze test coverage for the code you just wrote. Write additional tests for: edge cases, error conditions, boundary values, integration scenarios. Aim for 100% coverage. When you have achieved comprehensive test coverage, respond with exactly: 'LOOP_COMPLETE: Test coverage achieved.'",
+        "end_condition": "LOOP_COMPLETE: Test coverage achieved.",
+    },
 }
 
 
-def load_loop_prompts(prompts_file: str | None) -> dict[str, str]:
-    """Load loop prompts from file or return defaults."""
+def load_loop_prompts(prompts_file: str | None) -> dict[str, dict[str, str]]:
+    """Load loop prompts from file or return defaults.
+
+    Handles backward compatibility with old configs that stored prompts as strings.
+    """
     import json
     if prompts_file:
         try:
             with open(prompts_file) as f:
-                return json.load(f)
+                raw = json.load(f)
+                # Normalize to new format
+                normalized: dict[str, dict[str, str]] = {}
+                for name, value in raw.items():
+                    if isinstance(value, str):
+                        normalized[name] = {"prompt": value, "end_condition": ""}
+                    else:
+                        normalized[name] = value
+                return normalized
         except Exception:
             pass
     return DEFAULT_LOOP_PROMPTS.copy()
 
 
-def save_config(port: int, notification_sound: bool, loop_prompts: dict[str, str], max_loop_iterations: int) -> None:
+def save_config(
+    port: int,
+    notification_sound: bool,
+    loop_prompts: dict[str, dict[str, str]],
+    max_loop_iterations: int,
+) -> None:
     """Save dashboard config for hooks to read."""
     import json
     config_dir = Path.home() / ".augment" / "dashboard"

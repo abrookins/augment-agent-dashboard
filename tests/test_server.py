@@ -531,16 +531,32 @@ class TestGetLoopPrompts:
         assert isinstance(result, dict)
 
     def test_get_loop_prompts_with_file(self, tmp_path, monkeypatch):
-        """Test when config file exists."""
+        """Test when config file exists with new format."""
         from augment_agent_dashboard.server import _get_loop_prompts
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
         config_dir = tmp_path / ".augment" / "dashboard"
         config_dir.mkdir(parents=True)
+        (config_dir / "config.json").write_text('{"loop_prompts": {"test": {"prompt": "test prompt", "end_condition": "DONE"}}}')
+
+        result = _get_loop_prompts()
+        assert "test" in result
+        assert result["test"]["prompt"] == "test prompt"
+        assert result["test"]["end_condition"] == "DONE"
+
+    def test_get_loop_prompts_legacy_format(self, tmp_path, monkeypatch):
+        """Test backward compatibility with old string-only format."""
+        from augment_agent_dashboard.server import _get_loop_prompts
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        config_dir = tmp_path / ".augment" / "dashboard"
+        config_dir.mkdir(parents=True)
+        # Old format: prompts stored as plain strings
         (config_dir / "config.json").write_text('{"loop_prompts": {"test": "test prompt"}}')
 
         result = _get_loop_prompts()
         assert "test" in result
-        assert result["test"] == "test prompt"
+        # Should be normalized to new format with empty end_condition
+        assert result["test"]["prompt"] == "test prompt"
+        assert result["test"]["end_condition"] == ""
 
     def test_get_loop_prompts_invalid_json(self, tmp_path, monkeypatch):
         """Test when config file has invalid JSON."""
