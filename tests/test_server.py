@@ -746,13 +746,14 @@ class TestLoadLoopPrompts:
         assert result == DEFAULT_LOOP_PROMPTS
 
     def test_load_loop_prompts_with_file(self, tmp_path):
-        """Test with valid file."""
+        """Test with valid file - legacy string format is normalized to dict."""
         from augment_agent_dashboard.server import load_loop_prompts
         prompts_file = tmp_path / "prompts.json"
         prompts_file.write_text('{"custom": "prompt"}')
 
         result = load_loop_prompts(str(prompts_file))
-        assert result == {"custom": "prompt"}
+        # Legacy string format is normalized to new dict format with end_condition
+        assert result == {"custom": {"prompt": "prompt", "end_condition": ""}}
 
     def test_load_loop_prompts_invalid_file(self, tmp_path):
         """Test with invalid file."""

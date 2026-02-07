@@ -1655,23 +1655,44 @@ def render_session_detail(session, dark_mode: str | None, loop_prompts: dict[str
 
 DEFAULT_LOOP_PROMPTS: dict[str, dict[str, str]] = {
     "TDD Quality": {
-        "prompt": "Continue working on this task using TDD. Write tests first, then implement code to pass them. Verify code quality with mfcqi (target score >= 0.8). When you have achieved 100% test coverage AND mfcqi score >= 0.8, respond with exactly: 'LOOP_COMPLETE: TDD quality goals achieved.'",
+        "prompt": (
+            "Continue working on this task using TDD. Write tests first, then implement code to pass them. "
+            "Verify code quality with mfcqi (target score >= 0.8). When you have absolutely completed every "
+            "requirement—including ones you think don't matter—respond with exactly: 'LOOP_COMPLETE: TDD quality goals achieved.'"
+        ),
         "end_condition": "LOOP_COMPLETE: TDD quality goals achieved.",
     },
     "Code Review": {
-        "prompt": "Review the code you just wrote. Look for bugs, security issues, performance problems, and style violations. Fix any issues you find. When you have reviewed ALL code and fixed ALL issues, respond with exactly: 'LOOP_COMPLETE: Code review finished.'",
+        "prompt": (
+            "Review the code you just wrote. Look for bugs, security issues, performance problems, and style violations. "
+            "Fix any issues you find. When you have absolutely completed every requirement—including ones you think "
+            "don't matter—respond with exactly: 'LOOP_COMPLETE: Code review finished.'"
+        ),
         "end_condition": "LOOP_COMPLETE: Code review finished.",
     },
     "Refactor": {
-        "prompt": "Analyze the code you just wrote for opportunities to improve. Look for: duplicated code, overly complex logic, poor naming, violation of SOLID principles. Refactor where beneficial. When the code is as clean as it can reasonably be, respond with exactly: 'LOOP_COMPLETE: Refactoring finished.'",
+        "prompt": (
+            "Analyze the code you just wrote for opportunities to improve. Look for: duplicated code, overly complex logic, "
+            "poor naming, violation of SOLID principles. Refactor where beneficial. When you have absolutely completed every "
+            "requirement—including ones you think don't matter—respond with exactly: 'LOOP_COMPLETE: Refactoring finished.'"
+        ),
         "end_condition": "LOOP_COMPLETE: Refactoring finished.",
     },
     "Documentation": {
-        "prompt": "Review the code you just wrote for documentation quality. Add or improve: docstrings for all public functions/classes, inline comments for complex logic, type hints for all parameters and return values. When documentation is complete, respond with exactly: 'LOOP_COMPLETE: Documentation complete.'",
+        "prompt": (
+            "Review the code you just wrote for documentation quality. Add or improve: docstrings for all public "
+            "functions/classes, inline comments for complex logic, type hints for all parameters and return values. "
+            "When you have absolutely completed every requirement—including ones you think don't matter—respond with "
+            "exactly: 'LOOP_COMPLETE: Documentation complete.'"
+        ),
         "end_condition": "LOOP_COMPLETE: Documentation complete.",
     },
     "Test Coverage": {
-        "prompt": "Analyze test coverage for the code you just wrote. Write additional tests for: edge cases, error conditions, boundary values, integration scenarios. Aim for 100% coverage. When you have achieved comprehensive test coverage, respond with exactly: 'LOOP_COMPLETE: Test coverage achieved.'",
+        "prompt": (
+            "Analyze test coverage for the code you just wrote. Write additional tests for: edge cases, error conditions, "
+            "boundary values, integration scenarios. Aim for 100% coverage. When you have absolutely completed every "
+            "requirement—including ones you think don't matter—respond with exactly: 'LOOP_COMPLETE: Test coverage achieved.'"
+        ),
         "end_condition": "LOOP_COMPLETE: Test coverage achieved.",
     },
 }

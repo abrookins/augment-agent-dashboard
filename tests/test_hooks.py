@@ -640,6 +640,120 @@ class TestStopHookLoopLogic:
         assert "Do this next" in mock_spawn.call_args[0][2]
 
 
+class TestCheckGoalCompletion:
+    """Tests for the check_goal_completion function."""
+
+    def test_empty_text_returns_false(self):
+        """Empty agent text should return False."""
+        assert stop.check_goal_completion("", {}) is False
+        assert stop.check_goal_completion(None, {}) is False
+
+    def test_default_phrases_detected(self):
+        """Default completion phrases should be detected."""
+        assert stop.check_goal_completion("The goal has been achieved.", {}) is True
+        assert stop.check_goal_completion("All tasks are complete now.", {}) is True
+        assert stop.check_goal_completion("I have successfully completed the work.", {}) is True
+        assert stop.check_goal_completion("There's nothing left to do.", {}) is True
+
+    def test_case_insensitive(self):
+        """Detection should be case-insensitive."""
+        assert stop.check_goal_completion("THE GOAL HAS BEEN ACHIEVED", {}) is True
+        assert stop.check_goal_completion("Goal Has Been Achieved", {}) is True
+
+    def test_no_match_returns_false(self):
+        """Text without completion phrases should return False."""
+        assert stop.check_goal_completion("I'm still working on it.", {}) is False
+        assert stop.check_goal_completion("Let me continue with the next step.", {}) is False
+
+    def test_custom_phrases_from_config(self):
+        """Custom phrases from config should be used."""
+        config = {"completion_phrases": ["mission accomplished", "job done"]}
+        assert stop.check_goal_completion("Mission accomplished!", config) is True
+        assert stop.check_goal_completion("The job done now.", config) is True
+        # Default phrase should NOT match when custom config is provided
+        assert stop.check_goal_completion("Goal has been achieved", config) is False
+
+
+class TestStopHookGoalCompletion:
+    """Tests for goal completion detection stopping the loop."""
+
+    @patch("augment_agent_dashboard.hooks.stop.spawn_loop_message")
+    @patch("augment_agent_dashboard.hooks.stop.send_notification")
+    @patch("augment_agent_dashboard.hooks.stop.load_config")
+    @patch("augment_agent_dashboard.hooks.stop.SessionStore")
+    @patch("sys.stdin", new_callable=io.StringIO)
+    def test_loop_stops_on_goal_completion(self, mock_stdin, mock_store_class, mock_config, mock_notify, mock_spawn, tmp_path, monkeypatch):
+        """Loop should stop when agent indicates goal is complete."""
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        (tmp_path / ".augment" / "dashboard").mkdir(parents=True)
+
+        mock_store = MagicMock()
+        session = AgentSession(
+            session_id="conv-123",
+            conversation_id="conv-123",
+            workspace_root="/path/to/project",
+            workspace_name="project",
+            loop_enabled=True,
+            loop_count=5,
+        )
+        mock_store.get_session.return_value = session
+        mock_store_class.return_value = mock_store
+        mock_config.return_value = {"max_loop_iterations": 50}
+
+        # Agent response contains completion phrase
+        mock_stdin.write(json.dumps({
+            "workspace_roots": ["/path/to/project"],
+            "conversation_id": "conv-123",
+            "conversation": {"agentTextResponse": "All tasks are complete. The goal has been achieved."}
+        }))
+        mock_stdin.seek(0)
+
+        stop.run_hook()
+
+        # Loop should NOT continue - spawn_loop_message should NOT be called
+        mock_spawn.assert_not_called()
+        # Should get "Loop Complete" notification (after turn complete notification)
+        loop_complete_calls = [c for c in mock_notify.call_args_list if c[0][0] == "Loop Complete"]
+        assert len(loop_complete_calls) == 1
+        assert "5 iterations" in loop_complete_calls[0][0][1]
+
+    @patch("augment_agent_dashboard.hooks.stop.spawn_loop_message")
+    @patch("augment_agent_dashboard.hooks.stop.send_notification")
+    @patch("augment_agent_dashboard.hooks.stop.load_config")
+    @patch("augment_agent_dashboard.hooks.stop.SessionStore")
+    @patch("sys.stdin", new_callable=io.StringIO)
+    def test_loop_continues_without_completion_phrase(self, mock_stdin, mock_store_class, mock_config, mock_notify, mock_spawn, tmp_path, monkeypatch):
+        """Loop should continue when agent does not indicate completion."""
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        (tmp_path / ".augment" / "dashboard").mkdir(parents=True)
+
+        mock_store = MagicMock()
+        session = AgentSession(
+            session_id="conv-123",
+            conversation_id="conv-123",
+            workspace_root="/path/to/project",
+            workspace_name="project",
+            loop_enabled=True,
+            loop_count=5,
+        )
+        mock_store.get_session.return_value = session
+        mock_store_class.return_value = mock_store
+        mock_config.return_value = {"max_loop_iterations": 50}
+
+        # Agent response does NOT contain completion phrase
+        mock_stdin.write(json.dumps({
+            "workspace_roots": ["/path/to/project"],
+            "conversation_id": "conv-123",
+            "conversation": {"agentTextResponse": "I'm still working on the tests."}
+        }))
+        mock_stdin.seek(0)
+
+        stop.run_hook()
+
+        # Loop should continue
+        mock_spawn.assert_called_once()
+
+
 class TestMainEntryPoints:
     """Tests for main() entry points in hooks."""
 

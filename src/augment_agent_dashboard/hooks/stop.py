@@ -24,6 +24,51 @@ def load_config() -> dict:
     return {}
 
 
+# Default phrases that indicate the agent believes the goal is complete
+DEFAULT_COMPLETION_PHRASES = [
+    "goal has been achieved",
+    "goal is complete",
+    "task is complete",
+    "task has been completed",
+    "all tasks are complete",
+    "all done",
+    "work is complete",
+    "objective has been met",
+    "successfully completed",
+    "nothing left to do",
+    "no further action needed",
+    "no further actions needed",
+    "finished all",
+    "completed all",
+]
+
+
+def check_goal_completion(agent_text: str, config: dict) -> bool:
+    """Check if the agent's response indicates goal completion.
+
+    Args:
+        agent_text: The agent's response text
+        config: Dashboard config dict
+
+    Returns:
+        True if the response indicates the goal is complete
+    """
+    if not agent_text:
+        return False
+
+    # Get completion phrases from config, or use defaults
+    phrases = config.get("completion_phrases", DEFAULT_COMPLETION_PHRASES)
+
+    # Check case-insensitively
+    text_lower = agent_text.lower()
+
+    for phrase in phrases:
+        if phrase.lower() in text_lower:
+            return True
+
+    return False
+
+
 def send_notification(title: str, message: str, workspace_name: str, session_id: str, port: int = 9000, sound: bool = True) -> None:
     """Send a desktop notification using terminal-notifier if available."""
     # URL to open the session in the dashboard
@@ -262,13 +307,16 @@ def run_hook() -> None:
             if end_condition and agent_text:
                 end_condition_met = end_condition in agent_text
 
-            if end_condition_met:
-                # End condition met - stop the loop
+            # Also check for generic goal completion phrases as fallback
+            goal_complete = check_goal_completion(agent_text, config)
+
+            if end_condition_met or goal_complete:
+                # End condition met or goal achieved - stop the loop
                 session.loop_enabled = False
                 store.upsert_session(session)
                 send_notification(
                     "Loop Complete",
-                    f"End condition met after {session.loop_count} iterations",
+                    f"Goal achieved after {session.loop_count} iterations",
                     workspace_name,
                     session_id,
                     port=config.get("port", 9000),
@@ -286,7 +334,7 @@ def run_hook() -> None:
                 session.loop_enabled = False
                 store.upsert_session(session)
                 send_notification(
-                    "Quality Loop Complete",
+                    "Loop Complete",
                     f"Reached {max_iterations} iterations",
                     workspace_name,
                     session_id,
