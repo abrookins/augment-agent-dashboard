@@ -25,6 +25,8 @@ augment-dashboard = "augment_agent_dashboard.server:main"
 augment-dashboard-install = "augment_agent_dashboard.install:main"
 augment-dashboard-session-start = "augment_agent_dashboard.hooks.session_start:main"
 augment-dashboard-stop = "augment_agent_dashboard.hooks.stop:main"
+augment-dashboard-pre-tool = "augment_agent_dashboard.hooks.tool_use:run_pre_tool_use"
+augment-dashboard-post-tool = "augment_agent_dashboard.hooks.tool_use:run_post_tool_use"
 
 [build-system]
 requires = ["hatchling"]

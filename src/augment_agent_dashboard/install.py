@@ -43,6 +43,8 @@ def install_hooks() -> None:
     # Find paths to our hook commands
     session_start_path = find_command_path("augment-dashboard-session-start")
     stop_path = find_command_path("augment-dashboard-stop")
+    pre_tool_path = find_command_path("augment-dashboard-pre-tool")
+    post_tool_path = find_command_path("augment-dashboard-post-tool")
 
     if not session_start_path:
         print("Warning: augment-dashboard-session-start not found in PATH")
@@ -57,12 +59,22 @@ def install_hooks() -> None:
     # Create wrapper shell scripts (Augment requires .sh files)
     session_start_script = scripts_dir / "session-start.sh"
     stop_script = scripts_dir / "stop.sh"
+    pre_tool_script = scripts_dir / "pre-tool.sh"
+    post_tool_script = scripts_dir / "post-tool.sh"
 
     create_wrapper_script(session_start_script, session_start_path)
     print(f"Created wrapper: {session_start_script}")
 
     create_wrapper_script(stop_script, stop_path)
     print(f"Created wrapper: {stop_script}")
+
+    if pre_tool_path:
+        create_wrapper_script(pre_tool_script, pre_tool_path)
+        print(f"Created wrapper: {pre_tool_script}")
+
+    if post_tool_path:
+        create_wrapper_script(post_tool_script, post_tool_path)
+        print(f"Created wrapper: {post_tool_script}")
 
     # Load existing settings or create new
     if settings_file.exists():
@@ -103,6 +115,34 @@ def install_hooks() -> None:
             },
         }
     ]
+
+    # Add PreToolUse hook (optional - only if command exists)
+    if pre_tool_path:
+        settings["hooks"]["PreToolUse"] = [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": str(pre_tool_script),
+                        "timeout": 5000,
+                    }
+                ]
+            }
+        ]
+
+    # Add PostToolUse hook (optional - only if command exists)
+    if post_tool_path:
+        settings["hooks"]["PostToolUse"] = [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": str(post_tool_script),
+                        "timeout": 5000,
+                    }
+                ]
+            }
+        ]
 
     # Write settings
     settings_file.parent.mkdir(parents=True, exist_ok=True)
