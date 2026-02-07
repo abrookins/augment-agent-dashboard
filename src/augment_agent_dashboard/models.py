@@ -63,6 +63,9 @@ class AgentSession:
     files_changed: list[str] = field(default_factory=list)
     tools_used: list[str] = field(default_factory=list)
     agent_pid: int | None = None  # PID of the running Auggie process
+    # Quality loop settings
+    loop_enabled: bool = False
+    loop_count: int = 0
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
@@ -80,6 +83,8 @@ class AgentSession:
             "files_changed": self.files_changed,
             "tools_used": self.tools_used,
             "agent_pid": self.agent_pid,
+            "loop_enabled": self.loop_enabled,
+            "loop_count": self.loop_count,
         }
 
     @classmethod
@@ -99,6 +104,8 @@ class AgentSession:
             files_changed=data.get("files_changed", []),
             tools_used=data.get("tools_used", []),
             agent_pid=data.get("agent_pid"),
+            loop_enabled=data.get("loop_enabled", False),
+            loop_count=data.get("loop_count", 0),
         )
 
     @property

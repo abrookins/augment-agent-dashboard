@@ -77,6 +77,31 @@ def get_session_id(conversation_id: str) -> str:
     return conversation_id
 
 
+def spawn_loop_message(conversation_id: str, workspace_root: str | None, message: str) -> None:
+    """Spawn auggie subprocess to send the loop prompt."""
+    auggie_path = shutil.which("auggie")
+    if not auggie_path:
+        sys.stderr.write("auggie not found, cannot spawn loop message\n")
+        return
+
+    if not workspace_root:
+        sys.stderr.write("No workspace root, cannot spawn loop message\n")
+        return
+
+    try:
+        # Spawn auggie in background - don't wait for it
+        subprocess.Popen(
+            [auggie_path, "--resume", conversation_id, "--print", message],
+            cwd=workspace_root,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,  # Detach from parent process
+        )
+        sys.stderr.write(f"Spawned loop message for {conversation_id}\n")
+    except Exception as e:
+        sys.stderr.write(f"Failed to spawn loop message: {e}\n")
+
+
 def run_hook() -> None:
     """Entry point for Stop hook."""
     # Read hook input from stdin
@@ -155,8 +180,10 @@ def run_hook() -> None:
 
         sys.stderr.write(f"Updated dashboard session: {session_id}\n")
 
-        # Send desktop notification with link to session
+        # Load config for notifications and loop settings
         config = load_config()
+
+        # Send desktop notification with link to session
         preview = agent_text[:80] if agent_text else "Turn complete"
         send_notification(
             "Agent Turn Complete",
@@ -166,6 +193,39 @@ def run_hook() -> None:
             port=config.get("port", 9000),
             sound=config.get("notification_sound", True),
         )
+
+        # Check if quality loop is enabled for this session
+        session = store.get_session(session_id)
+        if session and session.loop_enabled:
+            max_iterations = config.get("max_loop_iterations", 50)
+            if session.loop_count < max_iterations:
+                # Increment loop count
+                session.loop_count += 1
+                store.upsert_session(session)
+
+                # Get loop prompt from config
+                loop_prompt = config.get(
+                    "loop_prompt",
+                    "Did you use TDD, reach 100% test coverage, and verify quality at .8 or above with mfcqi? If not, continue working. If choices must be made, choose wisely."
+                )
+
+                sys.stderr.write(f"Quality loop iteration {session.loop_count}/{max_iterations}\n")
+
+                # Spawn auggie with the loop prompt
+                spawn_loop_message(conversation_id, workspace_root, loop_prompt)
+            else:
+                # Max iterations reached, disable loop
+                session.loop_enabled = False
+                store.upsert_session(session)
+                sys.stderr.write(f"Quality loop reached max iterations ({max_iterations}), disabling\n")
+                send_notification(
+                    "Quality Loop Complete",
+                    f"Reached {max_iterations} iterations",
+                    workspace_name,
+                    session_id,
+                    port=config.get("port", 9000),
+                    sound=config.get("notification_sound", True),
+                )
 
     except Exception as e:
         sys.stderr.write(f"Dashboard store error: {e}\n")

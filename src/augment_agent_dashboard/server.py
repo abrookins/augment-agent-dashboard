@@ -166,6 +166,52 @@ async def api_get_session(session_id: str):
     return session.to_dict()
 
 
+@app.post("/session/{session_id}/loop/enable")
+async def enable_loop(session_id: str):
+    """Enable the quality loop for a session."""
+    store = get_store()
+    session = store.get_session(session_id)
+
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    session.loop_enabled = True
+    session.loop_count = 0
+    store.upsert_session(session)
+
+    return RedirectResponse(url=f"/session/{session_id}", status_code=303)
+
+
+@app.post("/session/{session_id}/loop/pause")
+async def pause_loop(session_id: str):
+    """Pause the quality loop for a session."""
+    store = get_store()
+    session = store.get_session(session_id)
+
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    session.loop_enabled = False
+    store.upsert_session(session)
+
+    return RedirectResponse(url=f"/session/{session_id}", status_code=303)
+
+
+@app.post("/session/{session_id}/loop/reset")
+async def reset_loop(session_id: str):
+    """Reset the loop counter for a session."""
+    store = get_store()
+    session = store.get_session(session_id)
+
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    session.loop_count = 0
+    store.upsert_session(session)
+
+    return RedirectResponse(url=f"/session/{session_id}", status_code=303)
+
+
 # HTML rendering functions (inline for simplicity)
 def get_base_styles(dark_mode: str | None) -> str:
     """Get CSS styles with dark/light mode support."""
@@ -614,12 +660,29 @@ def render_session_detail(session, dark_mode: str | None) -> str:
         <div class="session-detail-meta">
             <strong>Workspace:</strong> {session.workspace_root}<br>
             <strong>Session ID:</strong> {session.session_id}<br>
-            <form method="POST" action="/session/{session.session_id}/delete" style="display:inline;margin-top:8px;">
-                <button type="submit" onclick="return confirm('Delete this session?')"
-                    style="background:#dc2626;color:white;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:0.85em;">
-                    Delete Session
-                </button>
-            </form>
+            <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+                {"<span style='color:var(--status-active);font-weight:bold;'>🔄 Loop Active (" + str(session.loop_count) + " iterations)</span>" if session.loop_enabled else "<span style='color:var(--text-secondary);'>Loop Paused</span>"}
+                {'''<form method="POST" action="/session/''' + session.session_id + '''/loop/pause" style="display:inline;">
+                    <button type="submit" style="background:#fbbf24;color:#000;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:0.85em;">
+                        ⏸ Pause Loop
+                    </button>
+                </form>''' if session.loop_enabled else '''<form method="POST" action="/session/''' + session.session_id + '''/loop/enable" style="display:inline;">
+                    <button type="submit" style="background:var(--status-active);color:#000;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:0.85em;">
+                        ▶ Enable Loop
+                    </button>
+                </form>'''}
+                <form method="POST" action="/session/{session.session_id}/loop/reset" style="display:inline;">
+                    <button type="submit" style="background:var(--text-secondary);color:#fff;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:0.85em;">
+                        ↺ Reset Count
+                    </button>
+                </form>
+                <form method="POST" action="/session/{session.session_id}/delete" style="display:inline;">
+                    <button type="submit" onclick="return confirm('Delete this session?')"
+                        style="background:#dc2626;color:white;border:none;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:0.85em;">
+                        Delete Session
+                    </button>
+                </form>
+            </div>
         </div>
 
         <h2>Conversation</h2>
@@ -667,7 +730,10 @@ def render_session_detail(session, dark_mode: str | None) -> str:
     """
 
 
-def save_config(port: int, notification_sound: bool) -> None:
+DEFAULT_LOOP_PROMPT = """Did you use TDD, reach 100% test coverage, and verify quality at .8 or above with mfcqi? If not, continue working. If choices must be made, choose wisely."""
+
+
+def save_config(port: int, notification_sound: bool, loop_prompt: str, max_loop_iterations: int) -> None:
     """Save dashboard config for hooks to read."""
     import json
     config_dir = Path.home() / ".augment" / "dashboard"
@@ -676,6 +742,8 @@ def save_config(port: int, notification_sound: bool) -> None:
     config_path.write_text(json.dumps({
         "port": port,
         "notification_sound": notification_sound,
+        "loop_prompt": loop_prompt,
+        "max_loop_iterations": max_loop_iterations,
     }))
 
 
@@ -695,13 +763,21 @@ def main():
     parser.add_argument(
         "--no-sound", action="store_true", help="Disable notification sound"
     )
+    parser.add_argument(
+        "--loop-prompt", type=str, default=DEFAULT_LOOP_PROMPT,
+        help="Prompt to send after each turn when loop is enabled"
+    )
+    parser.add_argument(
+        "--max-loop-iterations", type=int, default=50,
+        help="Maximum number of loop iterations (default: 50)"
+    )
     args = parser.parse_args()
 
     # Determine sound setting
     notification_sound = not args.no_sound
 
     # Save config for hooks
-    save_config(args.port, notification_sound)
+    save_config(args.port, notification_sound, args.loop_prompt, args.max_loop_iterations)
 
     uvicorn.run(app, host="0.0.0.0", port=args.port)
 
