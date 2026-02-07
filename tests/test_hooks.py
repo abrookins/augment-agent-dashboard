@@ -767,3 +767,81 @@ class TestStopHookStoreError:
         assert "{}" in captured.out
         assert "Dashboard store error" in captured.err
 
+
+class TestMainEntryPoints:
+    """Tests for main() entry points and if __name__ == '__main__' blocks."""
+
+    @patch("augment_agent_dashboard.hooks.session_start.run_hook")
+    def test_session_start_main(self, mock_run_hook):
+        """Test session_start.main() calls run_hook."""
+        session_start.main()
+        mock_run_hook.assert_called_once()
+
+    @patch("augment_agent_dashboard.hooks.stop.run_hook")
+    def test_stop_main(self, mock_run_hook):
+        """Test stop.main() calls run_hook."""
+        stop.main()
+        mock_run_hook.assert_called_once()
+
+    @patch("augment_agent_dashboard.hooks.tool_use.run_hook")
+    def test_tool_use_main(self, mock_run_hook):
+        """Test tool_use.main() calls run_post_tool_use which calls run_hook."""
+        tool_use.main()
+        mock_run_hook.assert_called_once_with("PostToolUse")
+
+    @patch("augment_agent_dashboard.hooks.tool_use.run_hook")
+    def test_run_post_tool_use(self, mock_run_hook):
+        """Test run_post_tool_use calls run_hook with PostToolUse."""
+        tool_use.run_post_tool_use()
+        mock_run_hook.assert_called_once_with("PostToolUse")
+
+
+class TestIfNameMain:
+    """Tests for if __name__ == '__main__' blocks using runpy."""
+
+    def test_session_start_as_main(self, monkeypatch):
+        """Test running session_start as __main__."""
+        import runpy
+        import sys
+
+        # Mock stdin with valid JSON
+        mock_stdin = io.StringIO(json.dumps({
+            "workspace_roots": ["/test"],
+            "conversation_id": "test-conv"
+        }))
+        monkeypatch.setattr(sys, "stdin", mock_stdin)
+
+        with patch("augment_agent_dashboard.hooks.session_start.SessionStore"):
+            # Run the module as __main__
+            runpy.run_module("augment_agent_dashboard.hooks.session_start", run_name="__main__")
+
+    def test_stop_as_main(self, monkeypatch):
+        """Test running stop as __main__."""
+        import runpy
+        import sys
+
+        mock_stdin = io.StringIO(json.dumps({
+            "workspace_roots": ["/test"],
+            "conversation_id": "test-conv",
+            "conversation": {}
+        }))
+        monkeypatch.setattr(sys, "stdin", mock_stdin)
+
+        with patch("augment_agent_dashboard.hooks.stop.SessionStore"):
+            with patch("augment_agent_dashboard.hooks.stop.load_config", return_value={}):
+                runpy.run_module("augment_agent_dashboard.hooks.stop", run_name="__main__")
+
+    def test_tool_use_as_main(self, monkeypatch):
+        """Test running tool_use as __main__."""
+        import runpy
+        import sys
+
+        mock_stdin = io.StringIO(json.dumps({
+            "workspace_roots": ["/test"],
+            "conversation_id": "test-conv"
+        }))
+        monkeypatch.setattr(sys, "stdin", mock_stdin)
+
+        with patch("augment_agent_dashboard.hooks.tool_use.SessionStore"):
+            runpy.run_module("augment_agent_dashboard.hooks.tool_use", run_name="__main__")
+

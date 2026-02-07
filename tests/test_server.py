@@ -1042,3 +1042,48 @@ class TestMain:
         config_path = tmp_path / ".augment" / "dashboard" / "config.json"
         config = json.loads(config_path.read_text())
         assert config["max_loop_iterations"] == 100
+
+    def test_server_as_main(self, tmp_path, monkeypatch):
+        """Test running server as __main__."""
+        import runpy
+        import sys
+
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        monkeypatch.setattr(sys, "argv", ["augment-dashboard"])
+
+        with patch("uvicorn.run"):
+            runpy.run_module("augment_agent_dashboard.server", run_name="__main__")
+
+
+class TestStaticFileMount:
+    """Tests for static file mounting."""
+
+    def test_static_mount_when_dir_exists(self):
+        """Test that static files are mounted when directory exists."""
+        from pathlib import Path
+
+        from augment_agent_dashboard import server
+        static_dir = Path(server.__file__).parent / "static"
+
+        # The static directory should exist (created with .gitkeep)
+        assert static_dir.exists(), "Static directory should exist"
+
+        # Create a test file
+        test_file = static_dir / "test.txt"
+        test_file.write_text("test content")
+        try:
+            # Reload the module to trigger the static mount
+            import importlib
+            importlib.reload(server)
+
+            from fastapi.testclient import TestClient
+            client = TestClient(server.app)
+
+            # Try to access the static file
+            response = client.get("/static/test.txt")
+            assert response.status_code == 200
+            assert response.text == "test content"
+        finally:
+            # Clean up
+            if test_file.exists():
+                test_file.unlink()

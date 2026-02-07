@@ -218,3 +218,12 @@ class TestMain:
         install.main()
         mock_install.assert_called_once()
 
+    def test_install_as_main(self, tmp_path, monkeypatch):
+        """Test running install as __main__."""
+        import runpy
+
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+        with patch("augment_agent_dashboard.install.install_hooks"):
+            runpy.run_module("augment_agent_dashboard.install", run_name="__main__")
+
