@@ -102,6 +102,41 @@ async def spawn_auggie_message(conversation_id: str, workspace_root: str, messag
         return False
 
 
+async def spawn_new_session(workspace_root: str, prompt: str) -> bool:
+    """Spawn auggie subprocess to start a new session.
+
+    Returns True if the process was successfully started, False otherwise.
+
+    Note: This spawns a NEW auggie process without --resume, starting a fresh session.
+    The process runs in the background (detached).
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    auggie_path = shutil.which("auggie")
+    if not auggie_path:
+        logger.warning("auggie not found in PATH")
+        return False
+
+    logger.info(f"Spawning new auggie session in {workspace_root}")
+
+    try:
+        # Start auggie as a detached background process
+        process = await asyncio.create_subprocess_exec(
+            auggie_path,
+            "--print", prompt,
+            cwd=workspace_root,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=True,  # Detach from parent process
+        )
+        logger.info(f"New auggie session started with PID {process.pid}")
+        return True
+    except Exception as e:
+        logger.exception(f"Error spawning new auggie session: {e}")
+        return False
+
+
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
     """Main dashboard view showing all sessions."""
@@ -119,6 +154,38 @@ async def dashboard(request: Request):
 
     html = render_dashboard(sessions, dark_mode, sort_by)
     return HTMLResponse(content=html)
+
+
+@app.post("/session/new")
+async def create_new_session(
+    working_directory: Annotated[str, Form()],
+    prompt: Annotated[str, Form()],
+    background_tasks: BackgroundTasks,
+):
+    """Start a new auggie session in the specified directory with an initial prompt."""
+    import logging
+    import os
+    logger = logging.getLogger(__name__)
+
+    # Validate working directory
+    if not working_directory or not working_directory.strip():
+        raise HTTPException(status_code=400, detail="Working directory is required")
+
+    working_directory = os.path.expanduser(working_directory.strip())
+
+    if not os.path.isdir(working_directory):
+        raise HTTPException(status_code=400, detail=f"Directory does not exist: {working_directory}")
+
+    if not prompt or not prompt.strip():
+        raise HTTPException(status_code=400, detail="Prompt is required")
+
+    # Spawn auggie in background
+    background_tasks.add_task(spawn_new_session, working_directory, prompt.strip())
+
+    logger.info(f"Starting new session in {working_directory}")
+
+    # Redirect back to dashboard
+    return RedirectResponse(url="/", status_code=303)
 
 
 @app.get("/session/{session_id}", response_class=HTMLResponse)
@@ -256,6 +323,50 @@ async def api_get_session(session_id: str):
         raise HTTPException(status_code=404, detail="Session not found")
 
     return session.to_dict()
+
+
+@app.get("/api/sessions-html")
+async def api_sessions_html(
+    sort: Annotated[str, Query()] = "recent",
+):
+    """API endpoint returning session cards HTML for AJAX updates."""
+    store = get_store()
+    sessions = store.get_all_sessions()
+
+    # Sort sessions
+    if sort == "name":
+        sessions = sorted(sessions, key=lambda s: s.workspace_name.lower())
+    # Default is "recent" which is already sorted by last_activity in get_all_sessions
+
+    html = _render_session_cards(sessions)
+    return HTMLResponse(content=html)
+
+
+@app.get("/api/sessions/{session_id}/messages-html")
+async def api_session_messages_html(session_id: str):
+    """API endpoint returning session messages HTML for AJAX updates."""
+    store = get_store()
+    session = store.get_session(session_id)
+
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    loop_prompts = _get_loop_prompts()
+    messages_html, queued_count = _render_messages_html(session)
+    status_html = _render_session_status_html(session)
+    message_form_html = _render_message_form(session)
+    loop_controls_html = _render_loop_controls(session, loop_prompts)
+
+    return {
+        "messages_html": messages_html,
+        "queued_count": queued_count,
+        "status_html": status_html,
+        "message_form_html": message_form_html,
+        "loop_controls_html": loop_controls_html,
+        "status": session.status.value,
+        "message_count": session.message_count,
+        "last_activity": format_time_ago(session.last_activity),
+    }
 
 
 @app.post("/session/{session_id}/loop/enable")
@@ -1152,38 +1263,44 @@ def format_time_ago(dt: datetime) -> str:
         return f"{days}d ago"
 
 
-def render_dashboard(sessions: list, dark_mode: str | None, sort_by: str = "recent") -> str:
-    """Render the main dashboard HTML."""
-    styles = get_base_styles(dark_mode)
-
-    session_cards = ""
+def _render_session_cards(sessions: list) -> str:
+    """Render just the session cards HTML for AJAX updates."""
     if not sessions:
-        session_cards = (
+        return (
             '<div class="empty-state">'
             "No active sessions. Start an Augment conversation to see it here."
             "</div>"
         )
-    else:
-        for s in sessions:
-            status_class = f"status-{s.status.value}"
-            preview = s.last_message_preview or "No messages yet"
-            time_ago = format_time_ago(s.last_activity)
 
-            ellipsis = "..." if len(preview) > 80 else ""
-            session_cards += f"""
-            <a href="/session/{s.session_id}" class="session-card">
-                <div class="status-dot {status_class}" title="{s.status.value}"></div>
-                <div class="session-info">
-                    <h3>{s.workspace_name}</h3>
-                    <div class="workspace">{s.workspace_root}</div>
-                    <div class="preview">{preview[:80]}{ellipsis}</div>
-                </div>
-                <div class="session-meta">
-                    <div>{s.message_count} messages</div>
-                    <div>{time_ago}</div>
-                </div>
-            </a>
-            """
+    session_cards = ""
+    for s in sessions:
+        status_class = f"status-{s.status.value}"
+        preview = s.last_message_preview or "No messages yet"
+        time_ago = format_time_ago(s.last_activity)
+
+        ellipsis = "..." if len(preview) > 80 else ""
+        session_cards += f"""
+        <a href="/session/{s.session_id}" class="session-card">
+            <div class="status-dot {status_class}" title="{s.status.value}"></div>
+            <div class="session-info">
+                <h3>{s.workspace_name}</h3>
+                <div class="workspace">{s.workspace_root}</div>
+                <div class="preview">{preview[:80]}{ellipsis}</div>
+            </div>
+            <div class="session-meta">
+                <div>{s.message_count} messages</div>
+                <div>{time_ago}</div>
+            </div>
+        </a>
+        """
+    return session_cards
+
+
+def render_dashboard(sessions: list, dark_mode: str | None, sort_by: str = "recent") -> str:
+    """Render the main dashboard HTML."""
+    styles = get_base_styles(dark_mode)
+
+    session_cards = _render_session_cards(sessions)
 
     # Build sort links preserving dark mode
     dark_param = f"&dark={dark_mode}" if dark_mode else ""
@@ -1197,7 +1314,6 @@ def render_dashboard(sessions: list, dark_mode: str | None, sort_by: str = "rece
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Augment Agent Dashboard</title>
-        <meta http-equiv="refresh" content="10">
         <link rel="manifest" href="/manifest.json">
         <meta name="apple-mobile-web-app-capable" content="yes">
         <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -1220,13 +1336,79 @@ def render_dashboard(sessions: list, dark_mode: str | None, sort_by: str = "rece
         <div id="notification-banner" style="display:none;background:var(--accent);color:white;padding:10px 15px;border-radius:8px;margin-bottom:15px;cursor:pointer;">
             🔔 <span id="notification-text">Enable browser notifications to get alerts on your phone</span>
         </div>
-        <div class="session-list">
+        <div class="new-session-section" style="margin-bottom:20px;">
+            <button onclick="toggleNewSession()" class="btn-new-session" style="background:var(--accent);color:white;border:none;padding:10px 20px;border-radius:8px;cursor:pointer;font-size:1em;">
+                ➕ New Session
+            </button>
+            <div id="new-session-form" style="display:none;margin-top:15px;background:var(--card-bg);padding:20px;border-radius:12px;border:1px solid var(--border);">
+                <form method="POST" action="/session/new">
+                    <div style="margin-bottom:15px;">
+                        <label for="working_directory" style="display:block;margin-bottom:5px;font-weight:500;">Working Directory</label>
+                        <input type="text" id="working_directory" name="working_directory" placeholder="/path/to/project" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);box-sizing:border-box;">
+                    </div>
+                    <div style="margin-bottom:15px;">
+                        <label for="prompt" style="display:block;margin-bottom:5px;font-weight:500;">Initial Prompt</label>
+                        <textarea id="prompt" name="prompt" rows="4" placeholder="What would you like the agent to do?" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);resize:vertical;box-sizing:border-box;"></textarea>
+                    </div>
+                    <button type="submit" style="background:var(--accent);color:white;border:none;padding:10px 20px;border-radius:6px;cursor:pointer;font-size:1em;">🚀 Start Session</button>
+                </form>
+            </div>
+        </div>
+        <script>
+            function toggleNewSession() {{
+                const form = document.getElementById('new-session-form');
+                form.style.display = form.style.display === 'none' ? 'block' : 'none';
+            }}
+        </script>
+        <div class="session-list" id="session-list">
             {session_cards}
         </div>
         <script>
             {_get_notification_script()}
-            // Auto-refresh every 10 seconds
-            setTimeout(() => location.reload(), 10000);
+
+            // AJAX-based session list updates
+            const REFRESH_INTERVAL = 5000;
+            const sortBy = '{sort_by}';
+
+            function isUserInteracting() {{
+                // Check if new session form is visible
+                const newSessionForm = document.getElementById('new-session-form');
+                if (newSessionForm && newSessionForm.style.display !== 'none') {{
+                    return true;
+                }}
+                // Check if any input/textarea has focus
+                const activeEl = document.activeElement;
+                if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA')) {{
+                    return true;
+                }}
+                return false;
+            }}
+
+            async function refreshSessionList() {{
+                if (isUserInteracting()) {{
+                    // User is interacting, skip this refresh
+                    scheduleRefresh();
+                    return;
+                }}
+
+                try {{
+                    const response = await fetch('/api/sessions-html?sort=' + encodeURIComponent(sortBy));
+                    if (response.ok) {{
+                        const html = await response.text();
+                        document.getElementById('session-list').innerHTML = html;
+                    }}
+                }} catch (e) {{
+                    console.error('Failed to refresh session list:', e);
+                }}
+                scheduleRefresh();
+            }}
+
+            function scheduleRefresh() {{
+                setTimeout(refreshSessionList, REFRESH_INTERVAL);
+            }}
+
+            // Start the refresh cycle
+            scheduleRefresh();
         </script>
     </body>
     </html>
@@ -1523,11 +1705,11 @@ def _render_loop_controls(session, loop_prompts: dict[str, dict[str, str]]) -> s
         '''
 
 
-def render_session_detail(session, dark_mode: str | None, loop_prompts: dict[str, dict[str, str]]) -> str:
-    """Render the session detail HTML."""
-    styles = get_base_styles(dark_mode)
+def _render_messages_html(session) -> tuple[str, int]:
+    """Render just the messages HTML for a session.
 
-    # Render message history
+    Returns a tuple of (messages_html, queued_count).
+    """
     messages_html = ""
     queued_count = 0
     if not session.messages:
@@ -1567,6 +1749,25 @@ def render_session_detail(session, dark_mode: str | None, loop_prompts: dict[str
         </div>
         '''
 
+    return messages_html, queued_count
+
+
+def _render_session_status_html(session) -> str:
+    """Render the session status indicator HTML."""
+    time_ago = format_time_ago(session.last_activity)
+    return f"""
+        <div>{session.status.value} • {time_ago}</div>
+        <div>{session.message_count} messages</div>
+    """
+
+
+def render_session_detail(session, dark_mode: str | None, loop_prompts: dict[str, dict[str, str]]) -> str:
+    """Render the session detail HTML."""
+    styles = get_base_styles(dark_mode)
+
+    # Render message history
+    messages_html, queued_count = _render_messages_html(session)
+
     status_class = f"status-{session.status.value}"
     time_ago = format_time_ago(session.last_activity)
 
@@ -1604,7 +1805,9 @@ def render_session_detail(session, dark_mode: str | None, loop_prompts: dict[str
         <div class="session-detail-meta">
             <strong>Workspace:</strong> {session.workspace_root}<br>
             <strong>Session ID:</strong> {session.session_id}
-            {_render_loop_controls(session, loop_prompts)}
+            <div id="loop-controls-container">
+                {_render_loop_controls(session, loop_prompts)}
+            </div>
             <div class="loop-controls" style="margin-top:8px;">
                 <form method="POST" action="/session/{session.session_id}/delete">
                     <button type="submit" onclick="return confirm('Delete this session?')" class="btn-delete">
@@ -1615,37 +1818,102 @@ def render_session_detail(session, dark_mode: str | None, loop_prompts: dict[str
         </div>
 
         <h2>Conversation</h2>
-        <div class="message-list">
+        <div class="message-list" id="message-list">
             {messages_html}
         </div>
 
-        <div class="message-form">
+        <div class="message-form" id="message-form-container">
             <h3>Send Message to Agent</h3>
-            {_render_message_form(session)}
+            <div id="message-form-content">
+                {_render_message_form(session)}
+            </div>
         </div>
 
         <script>
-            // Auto-refresh every 5 seconds, but only if user isn't typing
-            let refreshTimer;
-            const textarea = document.getElementById('message-input');
+            // AJAX-based session updates
+            const REFRESH_INTERVAL = 3000;
+            const sessionId = '{session.session_id}';
+            let lastMessageCount = {session.message_count};
 
-            function scheduleRefresh() {{
-                refreshTimer = setTimeout(() => location.reload(), 5000);
+            function isUserInteracting() {{
+                const textarea = document.getElementById('message-input');
+                if (!textarea) return false;
+
+                // Check if textarea has focus
+                if (document.activeElement === textarea) return true;
+
+                // Check if textarea has content
+                if (textarea.value.trim()) return true;
+
+                return false;
             }}
 
-            textarea.addEventListener('focus', () => {{
-                clearTimeout(refreshTimer);
-            }});
+            async function refreshSession() {{
+                try {{
+                    const response = await fetch('/api/sessions/' + encodeURIComponent(sessionId) + '/messages-html');
+                    if (!response.ok) return;
 
-            textarea.addEventListener('blur', () => {{
-                if (!textarea.value.trim()) {{
-                    scheduleRefresh();
+                    const data = await response.json();
+
+                    // Update status indicator in header
+                    const statusMeta = document.querySelector('.session-meta');
+                    if (statusMeta) {{
+                        statusMeta.innerHTML = data.status_html;
+                    }}
+
+                    // Update status dot class
+                    const statusDot = document.querySelector('.status-dot');
+                    if (statusDot) {{
+                        statusDot.className = 'status-dot status-' + data.status;
+                    }}
+
+                    // Update messages - preserve scroll position
+                    const messageList = document.getElementById('message-list');
+                    if (messageList) {{
+                        const wasAtBottom = messageList.scrollHeight - messageList.scrollTop <= messageList.clientHeight + 100;
+                        const oldScrollTop = messageList.scrollTop;
+
+                        messageList.innerHTML = data.messages_html;
+
+                        // If user was at bottom or there are new messages, scroll to bottom
+                        if (wasAtBottom || data.message_count > lastMessageCount) {{
+                            messageList.scrollTop = messageList.scrollHeight;
+                        }} else {{
+                            messageList.scrollTop = oldScrollTop;
+                        }}
+                        lastMessageCount = data.message_count;
+                    }}
+
+                    // Update loop controls
+                    const loopControls = document.getElementById('loop-controls-container');
+                    if (loopControls) {{
+                        loopControls.innerHTML = data.loop_controls_html;
+                    }}
+
+                    // Update message form only if user is not interacting
+                    if (!isUserInteracting()) {{
+                        const formContent = document.getElementById('message-form-content');
+                        if (formContent) {{
+                            formContent.innerHTML = data.message_form_html;
+                        }}
+                    }}
+                }} catch (e) {{
+                    console.error('Failed to refresh session:', e);
                 }}
-            }});
-
-            // Only start auto-refresh if textarea is empty and not focused
-            if (document.activeElement !== textarea && !textarea.value.trim()) {{
                 scheduleRefresh();
+            }}
+
+            function scheduleRefresh() {{
+                setTimeout(refreshSession, REFRESH_INTERVAL);
+            }}
+
+            // Start the refresh cycle
+            scheduleRefresh();
+
+            // Scroll to bottom on initial load
+            const messageList = document.getElementById('message-list');
+            if (messageList) {{
+                messageList.scrollTop = messageList.scrollHeight;
             }}
         </script>
     </body>
