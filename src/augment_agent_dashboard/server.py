@@ -237,16 +237,65 @@ async def create_new_session(
 @app.get("/session/{session_id}", response_class=HTMLResponse)
 async def session_detail(session_id: str, request: Request):
     """Session detail view showing conversation history."""
+    from .federation.client import (
+        RemoteDashboardClient,
+        find_remote_by_hash,
+        is_remote_session_id,
+        parse_remote_session_id,
+    )
+
+    dark_mode = request.query_params.get("dark", None)
+    loop_prompts = _get_loop_prompts()
+
+    # Check if this is a remote session
+    if is_remote_session_id(session_id):
+        parsed = parse_remote_session_id(session_id)
+        if not parsed:
+            raise HTTPException(status_code=400, detail="Invalid remote session ID format")
+
+        url_hash, remote_session_id = parsed
+        fed_config = _get_federation_config()
+
+        # Find the remote dashboard by hash
+        remote = find_remote_by_hash(fed_config.remote_dashboards, url_hash)
+        if not remote:
+            raise HTTPException(
+                status_code=404,
+                detail="Remote dashboard not found - it may have been removed from config"
+            )
+
+        # Fetch the session from the remote
+        client = RemoteDashboardClient(remote)
+        session_data = await client.fetch_session_detail(remote_session_id)
+
+        if not session_data:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Session not found on remote dashboard '{remote.name}'"
+            )
+
+        # Render remote session detail
+        page_html = render_remote_session_detail(
+            session_data,
+            remote,
+            session_id,  # federated session ID for links
+            dark_mode,
+        )
+        return HTMLResponse(content=page_html)
+
+    # Local session
     store = get_store()
     session = store.get_session(session_id)
 
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    dark_mode = request.query_params.get("dark", None)
-    loop_prompts = _get_loop_prompts()
-    html = render_session_detail(session, dark_mode, loop_prompts)
-    return HTMLResponse(content=html)
+    # Get local machine name from federation config
+    fed_config = _get_federation_config()
+    machine_name = fed_config.this_machine_name
+
+    page_html = render_session_detail(session, dark_mode, loop_prompts, machine_name)
+    return HTMLResponse(content=page_html)
 
 
 @app.post("/session/{session_id}/message")
@@ -337,6 +386,50 @@ async def delete_session(session_id: str):
         raise HTTPException(status_code=404, detail="Session not found")
 
     return RedirectResponse(url="/", status_code=303)
+
+
+@app.post("/api/remote/session/{session_id}/message")
+async def send_message_to_remote(
+    session_id: str,
+    message: Annotated[str, Form()],
+):
+    """Send a message to a remote session by proxying to its origin dashboard."""
+    from .federation.client import (
+        RemoteDashboardClient,
+        find_remote_by_hash,
+        is_remote_session_id,
+        parse_remote_session_id,
+    )
+
+    if not is_remote_session_id(session_id):
+        raise HTTPException(status_code=400, detail="Not a remote session ID")
+
+    parsed = parse_remote_session_id(session_id)
+    if not parsed:
+        raise HTTPException(status_code=400, detail="Invalid remote session ID format")
+
+    url_hash, remote_session_id = parsed
+    fed_config = _get_federation_config()
+
+    # Find the remote dashboard
+    remote = find_remote_by_hash(fed_config.remote_dashboards, url_hash)
+    if not remote:
+        raise HTTPException(
+            status_code=404,
+            detail="Remote dashboard not found - it may have been removed from config"
+        )
+
+    # Send the message via the remote dashboard's API
+    client = RemoteDashboardClient(remote)
+    success = await client.send_message(remote_session_id, message.strip())
+
+    if not success:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to send message to remote dashboard '{remote.name}'"
+        )
+
+    return RedirectResponse(url=f"/session/{session_id}", status_code=303)
 
 
 @app.get("/api/sessions")
@@ -2831,7 +2924,12 @@ def _render_session_status_html(session) -> str:
     """
 
 
-def render_session_detail(session, dark_mode: str | None, loop_prompts: dict[str, dict[str, str]]) -> str:
+def render_session_detail(
+    session,
+    dark_mode: str | None,
+    loop_prompts: dict[str, dict[str, str]],
+    machine_name: str = "This Machine",
+) -> str:
     """Render the session detail HTML."""
     styles = get_base_styles(dark_mode)
 
@@ -2840,6 +2938,7 @@ def render_session_detail(session, dark_mode: str | None, loop_prompts: dict[str
 
     status_class = f"status-{session.status.value}"
     time_ago = format_time_ago(session.last_activity, include_title=True)
+    escaped_machine = html.escape(machine_name)
 
     return f"""
     <!DOCTYPE html>
@@ -2873,6 +2972,11 @@ def render_session_detail(session, dark_mode: str | None, loop_prompts: dict[str
         </div>
 
         <div class="session-detail-meta">
+            <div class="machine-badge" style="display:inline-block;background:var(--accent);
+                 color:white;padding:4px 10px;border-radius:12px;font-size:0.85em;margin-bottom:8px;">
+                💻 {escaped_machine}
+            </div>
+            <br>
             <strong>Workspace:</strong> {session.workspace_root}<br>
             <strong>Session ID:</strong> {session.session_id}
             <div id="loop-controls-container">
@@ -3052,6 +3156,167 @@ def render_session_detail(session, dark_mode: str | None, loop_prompts: dict[str
                     }}
                 }}
             }});
+        </script>
+    </body>
+    </html>
+    """
+
+
+def render_remote_session_detail(
+    session_data: dict,
+    remote,
+    federated_session_id: str,
+    dark_mode: str | None,
+) -> str:
+    """Render the session detail HTML for a remote session.
+
+    Args:
+        session_data: Session data dict from the remote dashboard.
+        remote: RemoteDashboard instance.
+        federated_session_id: The federated session ID for URL links.
+        dark_mode: Dark mode setting.
+    """
+    styles = get_base_styles(dark_mode)
+
+    workspace_name = html.escape(session_data.get("workspace_name", "Unknown"))
+    workspace_root = html.escape(session_data.get("workspace_root", ""))
+    status = session_data.get("status", "stopped")
+    message_count = session_data.get("message_count", 0)
+    remote_session_id = session_data.get("session_id", "")
+
+    # Parse last_activity for time ago
+    last_activity_str = session_data.get("last_activity", "")
+    if last_activity_str:
+        try:
+            from datetime import datetime
+            last_activity = datetime.fromisoformat(last_activity_str.replace("Z", "+00:00"))
+            time_ago = format_time_ago(last_activity, include_title=True)
+        except Exception:
+            time_ago = "Unknown"
+    else:
+        time_ago = "Unknown"
+
+    # Render messages
+    messages = session_data.get("messages", [])
+    messages_html = ""
+    for msg in messages:
+        role = msg.get("role", "system")
+        content = msg.get("content", "")
+        timestamp = msg.get("timestamp", "")
+
+        role_class = f"message-{role}"
+        role_label = role.upper()
+
+        if role == "assistant":
+            content_html = render_markdown(content)
+        else:
+            content_html = f"<pre>{html.escape(content)}</pre>"
+
+        # Base64 encode for copy button
+        import base64
+        base64_content = base64.b64encode(content.encode()).decode()
+
+        messages_html += f'''
+        <div class="message {role_class}">
+            <div class="message-header">
+                <span class="role-badge">{role_label}</span>
+                <span class="timestamp" data-timestamp="{timestamp}">{timestamp}</span>
+                <button class="copy-btn" onclick="copyMessage(this, '{base64_content}')">📋 Copy</button>
+            </div>
+            <div class="message-content">{content_html}</div>
+        </div>
+        '''
+
+    if not messages_html:
+        messages_html = '<div style="color:var(--text-secondary);text-align:center;padding:20px;">No messages yet</div>'
+
+    # Message form for remote sessions - proxied through our server
+    message_form = f'''
+        <p style="color: var(--text-secondary); margin-bottom: 10px;">
+            Send a message to this session on <strong>{html.escape(remote.name)}</strong>
+        </p>
+        <form method="POST" action="/api/remote/session/{federated_session_id}/message">
+            <textarea id="message-input" name="message" placeholder="Type a message for the agent..."></textarea>
+            <button type="submit">▶ Send to Remote</button>
+        </form>
+    '''
+
+    return f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>{workspace_name} - {html.escape(remote.name)} - Augment Dashboard</title>
+        <link rel="manifest" href="/manifest.json">
+        <meta name="apple-mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+        <meta name="apple-mobile-web-app-title" content="Augment">
+        <link rel="apple-touch-icon" href="/icon-192.png">
+        <meta name="theme-color" content="#6366f1">
+        {styles}
+    </head>
+    <body>
+        <a href="/" class="back-link">← Back to Dashboard</a>
+
+        <div class="header">
+            <h1>
+                <span class="status-dot status-{status}"
+                    style="display:inline-block;vertical-align:middle;margin-right:10px;">
+                </span>
+                {workspace_name}
+            </h1>
+            <div class="session-meta">
+                <div>{status} • {time_ago}</div>
+                <div>{message_count} messages</div>
+            </div>
+        </div>
+
+        <div class="session-detail-meta">
+            <div style="background:var(--border-color);padding:8px 12px;border-radius:6px;margin-bottom:10px;">
+                🌐 <strong>Remote Session</strong> from <strong>{html.escape(remote.name)}</strong>
+                <span style="color:var(--text-secondary);font-size:0.85em;">({html.escape(remote.url)})</span>
+            </div>
+            <strong>Workspace:</strong> {workspace_root}<br>
+            <strong>Remote Session ID:</strong> {remote_session_id}
+        </div>
+
+        <h2>Conversation</h2>
+        <div class="message-list" id="message-list">
+            {messages_html}
+        </div>
+
+        <div class="message-form" id="message-form-container">
+            <h3>Send Message to Agent</h3>
+            <div id="message-form-content">
+                {message_form}
+            </div>
+        </div>
+
+        <script>
+            {_get_timestamp_script()}
+
+            // Copy message to clipboard
+            async function copyMessage(btn, base64Content) {{
+                try {{
+                    const text = atob(base64Content);
+                    await navigator.clipboard.writeText(text);
+                    btn.innerHTML = '✓ Copied';
+                    btn.classList.add('copied');
+                    setTimeout(() => {{
+                        btn.innerHTML = '📋 Copy';
+                        btn.classList.remove('copied');
+                    }}, 2000);
+                }} catch (err) {{
+                    console.error('Failed to copy:', err);
+                }}
+            }}
+
+            // Scroll to bottom on load
+            const messageList = document.getElementById('message-list');
+            if (messageList) {{
+                messageList.scrollTop = messageList.scrollHeight;
+            }}
         </script>
     </body>
     </html>
