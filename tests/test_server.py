@@ -656,14 +656,47 @@ class TestFormatTimeAgo:
         result = format_time_ago(now - timedelta(hours=3))
         assert "h ago" in result
 
+    def test_format_time_ago_yesterday(self):
+        """Test time yesterday."""
+        from datetime import datetime, timezone, timedelta
+        from augment_agent_dashboard.server import format_time_ago
+
+        now = datetime.now(timezone.utc)
+        result = format_time_ago(now - timedelta(days=1, hours=12))
+        assert result == "yesterday"
+
     def test_format_time_ago_days(self):
         """Test time days ago."""
         from datetime import datetime, timezone, timedelta
         from augment_agent_dashboard.server import format_time_ago
 
         now = datetime.now(timezone.utc)
-        result = format_time_ago(now - timedelta(days=2))
-        assert "d ago" in result
+        result = format_time_ago(now - timedelta(days=3))
+        assert result == "3 days ago"
+
+    def test_format_time_ago_weeks(self):
+        """Test time weeks ago."""
+        from datetime import datetime, timezone, timedelta
+        from augment_agent_dashboard.server import format_time_ago
+
+        now = datetime.now(timezone.utc)
+        result = format_time_ago(now - timedelta(days=8))
+        assert result == "a week ago"
+
+        result = format_time_ago(now - timedelta(days=21))
+        assert result == "3 weeks ago"
+
+    def test_format_time_ago_with_title(self):
+        """Test format_time_ago with include_title=True returns HTML."""
+        from datetime import datetime, timezone, timedelta
+        from augment_agent_dashboard.server import format_time_ago
+
+        now = datetime.now(timezone.utc)
+        dt = now - timedelta(hours=2)
+        result = format_time_ago(dt, include_title=True)
+        assert '<span class="timestamp"' in result
+        assert 'data-utc="' in result
+        assert '2h ago</span>' in result
 
     def test_format_time_ago_naive_datetime(self):
         """Test with naive datetime (no timezone)."""

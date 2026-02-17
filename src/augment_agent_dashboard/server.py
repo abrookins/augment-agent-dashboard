@@ -1242,8 +1242,49 @@ def _get_notification_script() -> str:
     """
 
 
-def format_time_ago(dt: datetime) -> str:
-    """Format a datetime as a human-readable time ago string."""
+def _get_timestamp_script() -> str:
+    """Get JavaScript to localize UTC timestamps to local timezone on hover."""
+    return """
+        function localizeTimestamps() {
+            document.querySelectorAll('.timestamp[data-utc]').forEach(el => {
+                const utc = el.dataset.utc;
+                if (utc && !el.dataset.localized) {
+                    const date = new Date(utc);
+                    const options = {
+                        weekday: 'short',
+                        year: 'numeric',
+                        month: 'short',
+                        day: 'numeric',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        second: '2-digit',
+                        timeZoneName: 'short'
+                    };
+                    el.title = date.toLocaleString(undefined, options);
+                    el.dataset.localized = 'true';
+                }
+            });
+        }
+
+        // Run on page load
+        localizeTimestamps();
+
+        // Re-run after AJAX updates (observe DOM changes)
+        const timestampObserver = new MutationObserver(() => localizeTimestamps());
+        timestampObserver.observe(document.body, { childList: true, subtree: true });
+    """
+
+
+def format_time_ago(dt: datetime, include_title: bool = False) -> str:
+    """Format a datetime as a human-readable relative time string.
+
+    Args:
+        dt: The datetime to format
+        include_title: If True, wrap in span with full datetime as title for hover
+
+    Returns:
+        Relative time string, optionally wrapped in span with hover title
+    """
     now = datetime.now(timezone.utc)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
@@ -1251,16 +1292,30 @@ def format_time_ago(dt: datetime) -> str:
     seconds = diff.total_seconds()
 
     if seconds < 60:
-        return "just now"
+        relative = "just now"
     elif seconds < 3600:
         mins = int(seconds / 60)
-        return f"{mins}m ago"
+        relative = f"{mins}m ago"
     elif seconds < 86400:
         hours = int(seconds / 3600)
-        return f"{hours}h ago"
-    else:
+        relative = f"{hours}h ago"
+    elif seconds < 172800:  # 2 days
+        relative = "yesterday"
+    elif seconds < 604800:  # 7 days
         days = int(seconds / 86400)
-        return f"{days}d ago"
+        relative = f"{days} days ago"
+    else:
+        weeks = int(seconds / 604800)
+        if weeks == 1:
+            relative = "a week ago"
+        else:
+            relative = f"{weeks} weeks ago"
+
+    if include_title:
+        # Full datetime for hover - will be converted to local time via JS
+        iso_str = dt.isoformat()
+        return f'<span class="timestamp" data-utc="{iso_str}" title="{iso_str}">{relative}</span>'
+    return relative
 
 
 def _render_session_cards(sessions: list) -> str:
@@ -1276,7 +1331,7 @@ def _render_session_cards(sessions: list) -> str:
     for s in sessions:
         status_class = f"status-{s.status.value}"
         preview = s.last_message_preview or "No messages yet"
-        time_ago = format_time_ago(s.last_activity)
+        time_ago = format_time_ago(s.last_activity, include_title=True)
 
         ellipsis = "..." if len(preview) > 80 else ""
         session_cards += f"""
@@ -1365,6 +1420,7 @@ def render_dashboard(sessions: list, dark_mode: str | None, sort_by: str = "rece
         </div>
         <script>
             {_get_notification_script()}
+            {_get_timestamp_script()}
 
             // AJAX-based session list updates
             const REFRESH_INTERVAL = 5000;
@@ -1717,7 +1773,11 @@ def _render_messages_html(session) -> tuple[str, int]:
     else:
         for msg in session.messages:
             role_class = msg.role
-            time_str = msg.timestamp.strftime("%H:%M:%S") if msg.timestamp else ""
+            time_str = (
+                format_time_ago(msg.timestamp, include_title=True)
+                if msg.timestamp
+                else ""
+            )
 
             if msg.role == "queued":
                 queued_count += 1
@@ -1754,7 +1814,7 @@ def _render_messages_html(session) -> tuple[str, int]:
 
 def _render_session_status_html(session) -> str:
     """Render the session status indicator HTML."""
-    time_ago = format_time_ago(session.last_activity)
+    time_ago = format_time_ago(session.last_activity, include_title=True)
     return f"""
         <div>{session.status.value} • {time_ago}</div>
         <div>{session.message_count} messages</div>
@@ -1769,7 +1829,7 @@ def render_session_detail(session, dark_mode: str | None, loop_prompts: dict[str
     messages_html, queued_count = _render_messages_html(session)
 
     status_class = f"status-{session.status.value}"
-    time_ago = format_time_ago(session.last_activity)
+    time_ago = format_time_ago(session.last_activity, include_title=True)
 
     return f"""
     <!DOCTYPE html>
@@ -1830,6 +1890,8 @@ def render_session_detail(session, dark_mode: str | None, loop_prompts: dict[str
         </div>
 
         <script>
+            {_get_timestamp_script()}
+
             // AJAX-based session updates
             const REFRESH_INTERVAL = 3000;
             const sessionId = '{session.session_id}';
