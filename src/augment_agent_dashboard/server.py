@@ -786,6 +786,37 @@ def get_base_styles(dark_mode: str | None) -> str:
             font-size: 0.8em;
             color: var(--text-secondary);
             margin-bottom: 8px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }}
+        .message-header-info {{
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }}
+        .copy-btn {{
+            background: transparent;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            padding: 2px 8px;
+            font-size: 0.85em;
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }}
+        .copy-btn:hover {{
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            border-color: var(--accent);
+        }}
+        .copy-btn.copied {{
+            background: var(--status-active);
+            color: white;
+            border-color: var(--status-active);
         }}
         .message-content {{
             word-break: break-word;
@@ -1766,12 +1797,14 @@ def _render_messages_html(session) -> tuple[str, int]:
 
     Returns a tuple of (messages_html, queued_count).
     """
+    import base64
+
     messages_html = ""
     queued_count = 0
     if not session.messages:
         messages_html = '<div class="empty-state">No messages in this session yet.</div>'
     else:
-        for msg in session.messages:
+        for idx, msg in enumerate(session.messages):
             role_class = msg.role
             time_str = (
                 format_time_ago(msg.timestamp, include_title=True)
@@ -1790,9 +1823,19 @@ def _render_messages_html(session) -> tuple[str, int]:
                 role_label = msg.role.capitalize()
                 content_html = f"<p>{html.escape(msg.content)}</p>"
 
+            # Encode raw content as base64 for the copy button
+            raw_content_b64 = base64.b64encode(msg.content.encode("utf-8")).decode("ascii")
+            msg_id = f"msg-{idx}"
+
+            copy_onclick = f"copyMessage(this, '{raw_content_b64}')"
             messages_html += f"""
-            <div class="message {role_class}">
-                <div class="message-header">{role_label} • {time_str}</div>
+            <div class="message {role_class}" id="{msg_id}">
+                <div class="message-header">
+                    <span class="message-header-info">{role_label} • {time_str}</span>
+                    <button class="copy-btn" onclick="{copy_onclick}" title="Copy">
+                        📋 Copy
+                    </button>
+                </div>
                 <div class="message-content">{content_html}</div>
             </div>
             """
@@ -1891,6 +1934,44 @@ def render_session_detail(session, dark_mode: str | None, loop_prompts: dict[str
 
         <script>
             {_get_timestamp_script()}
+
+            // Copy message to clipboard
+            async function copyMessage(btn, base64Content) {{
+                try {{
+                    // Decode base64 content
+                    const text = atob(base64Content);
+                    await navigator.clipboard.writeText(text);
+
+                    // Visual feedback
+                    const originalText = btn.innerHTML;
+                    btn.innerHTML = '✓ Copied';
+                    btn.classList.add('copied');
+
+                    setTimeout(() => {{
+                        btn.innerHTML = originalText;
+                        btn.classList.remove('copied');
+                    }}, 2000);
+                }} catch (err) {{
+                    console.error('Failed to copy:', err);
+                    // Fallback for older browsers
+                    const text = atob(base64Content);
+                    const textarea = document.createElement('textarea');
+                    textarea.value = text;
+                    textarea.style.position = 'fixed';
+                    textarea.style.opacity = '0';
+                    document.body.appendChild(textarea);
+                    textarea.select();
+                    document.execCommand('copy');
+                    document.body.removeChild(textarea);
+
+                    btn.innerHTML = '✓ Copied';
+                    btn.classList.add('copied');
+                    setTimeout(() => {{
+                        btn.innerHTML = '📋 Copy';
+                        btn.classList.remove('copied');
+                    }}, 2000);
+                }}
+            }}
 
             // AJAX-based session updates
             const REFRESH_INTERVAL = 3000;
