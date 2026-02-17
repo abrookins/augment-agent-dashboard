@@ -12,6 +12,8 @@ from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Query, Reques
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
+from .federation.models import FederationConfig, RemoteDashboard
+from .federation.routes import router as federation_router
 from .models import SessionStatus
 from .store import SessionStore
 
@@ -24,6 +26,9 @@ def render_markdown(text: str) -> str:
     )
 
 app = FastAPI(title="Augment Agent Dashboard", version="0.1.0")
+
+# Include federation routes
+app.include_router(federation_router)
 
 # Mount static files
 static_dir = Path(__file__).parent / "static"
@@ -140,20 +145,61 @@ async def spawn_new_session(workspace_root: str, prompt: str) -> bool:
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
     """Main dashboard view showing all sessions."""
+    from .federation.client import RemoteDashboardClient
+
     store = get_store()
-    sessions = store.get_all_sessions()
+    local_sessions = store.get_all_sessions()
 
     # Determine dark mode from query param or default to system preference
     dark_mode = request.query_params.get("dark", None)
     sort_by = request.query_params.get("sort", "recent")
 
-    # Sort sessions
+    # Sort local sessions
     if sort_by == "name":
-        sessions = sorted(sessions, key=lambda s: s.workspace_name.lower())
-    # Default is "recent" which is already sorted by last_activity in get_all_sessions
+        local_sessions = sorted(local_sessions, key=lambda s: s.workspace_name.lower())
 
-    html = render_dashboard(sessions, dark_mode, sort_by)
-    return HTMLResponse(content=html)
+    # Get federation config
+    fed_config = _get_federation_config()
+
+    # If federation is enabled and we have remotes, fetch their sessions
+    remote_sessions_by_origin: dict[str, list] = {}
+    if fed_config.enabled and fed_config.remote_dashboards:
+        import asyncio
+
+        async def fetch_remote(remote: RemoteDashboard):
+            client = RemoteDashboardClient(remote)
+            sessions = await client.fetch_sessions()
+            return (remote, sessions)
+
+        # Fetch from all remotes in parallel
+        tasks = [fetch_remote(r) for r in fed_config.remote_dashboards]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for result in results:
+            if isinstance(result, Exception):
+                continue
+            remote, sessions = result
+            if sort_by == "name":
+                sessions = sorted(sessions, key=lambda s: s.workspace_name.lower())
+            remote_sessions_by_origin[remote.url] = {
+                "remote": remote,
+                "sessions": sessions,
+            }
+
+    # Render with swim lanes if we have remotes configured
+    if fed_config.remote_dashboards:
+        page_html = render_dashboard_swimlanes(
+            local_sessions,
+            remote_sessions_by_origin,
+            fed_config,
+            dark_mode,
+            sort_by,
+        )
+    else:
+        # Single machine mode - no swim lanes needed
+        page_html = render_dashboard(local_sessions, dark_mode, sort_by)
+
+    return HTMLResponse(content=page_html)
 
 
 @app.post("/session/new")
@@ -342,6 +388,100 @@ async def api_sessions_html(
     return HTMLResponse(content=html)
 
 
+@app.get("/api/swimlanes-html")
+async def api_swimlanes_html(
+    sort: Annotated[str, Query()] = "recent",
+):
+    """API endpoint returning swim lanes HTML for AJAX updates."""
+    from .federation.client import RemoteDashboardClient
+
+    store = get_store()
+    local_sessions = store.get_all_sessions()
+
+    if sort == "name":
+        local_sessions = sorted(local_sessions, key=lambda s: s.workspace_name.lower())
+
+    fed_config = _get_federation_config()
+
+    # Build lanes HTML
+    lanes_html = ""
+
+    # Local lane
+    lanes_html += _render_swim_lane(
+        lane_id="local",
+        name=fed_config.this_machine_name,
+        sessions=local_sessions,
+        is_online=True,
+        is_local=True,
+    )
+
+    # Remote lanes
+    if fed_config.enabled and fed_config.remote_dashboards:
+        import asyncio
+
+        async def fetch_remote(remote: RemoteDashboard):
+            client = RemoteDashboardClient(remote)
+            sessions = await client.fetch_sessions()
+            return (remote, sessions)
+
+        tasks = [fetch_remote(r) for r in fed_config.remote_dashboards]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        lane_index = 1
+        for i, remote in enumerate(fed_config.remote_dashboards):
+            result = results[i]
+            if isinstance(result, Exception):
+                sessions = []
+                is_online = False
+            else:
+                _, sessions = result
+                is_online = True
+                if sort == "name":
+                    sessions = sorted(sessions, key=lambda s: s.workspace_name.lower())
+
+            lanes_html += _render_swim_lane(
+                lane_id=f"remote-{lane_index}",
+                name=remote.name,
+                sessions=sessions,
+                is_online=is_online,
+                is_local=False,
+                origin_url=remote.url,
+            )
+            lane_index += 1
+
+    return HTMLResponse(content=lanes_html)
+
+
+@app.post("/api/federation/proxy/session/new")
+async def proxy_create_session(
+    origin: Annotated[str, Query()],
+    working_directory: Annotated[str, Form()],
+    prompt: Annotated[str, Form()],
+):
+    """Proxy session creation to a remote dashboard."""
+    from .federation.client import RemoteDashboardClient
+
+    fed_config = _get_federation_config()
+
+    # Find the remote dashboard
+    remote = None
+    for r in fed_config.remote_dashboards:
+        if r.url == origin:
+            remote = r
+            break
+
+    if not remote:
+        raise HTTPException(status_code=404, detail="Remote dashboard not found")
+
+    client = RemoteDashboardClient(remote)
+    result = await client.create_session(working_directory, prompt)
+
+    if not result:
+        raise HTTPException(status_code=502, detail="Failed to create session on remote")
+
+    return RedirectResponse(url="/", status_code=303)
+
+
 @app.get("/api/sessions/{session_id}/messages-html")
 async def api_session_messages_html(session_id: str):
     """API endpoint returning session messages HTML for AJAX updates."""
@@ -469,6 +609,115 @@ async def edit_prompt(
     return RedirectResponse(url="/config", status_code=303)
 
 
+@app.post("/config/memory")
+async def save_memory_config(
+    server_url: Annotated[str, Form()] = "",
+    namespace: Annotated[str, Form()] = "augment",
+    user_id: Annotated[str, Form()] = "",
+    api_key: Annotated[str, Form()] = "",
+    auto_capture: Annotated[str | None, Form()] = None,
+    auto_recall: Annotated[str | None, Form()] = None,
+    use_workspace_namespace: Annotated[str | None, Form()] = None,
+    use_persistent_session: Annotated[str | None, Form()] = None,
+    track_tool_usage: Annotated[str | None, Form()] = None,
+):
+    """Save memory server configuration."""
+    config = _get_full_config()
+
+    # Build memory config - checkboxes send "true" if checked, None if not
+    memory_config = {
+        "server_url": server_url.strip(),
+        "namespace": namespace.strip() or "augment",
+        "user_id": user_id.strip(),
+        "api_key": api_key.strip(),
+        "auto_capture": auto_capture == "true",
+        "auto_recall": auto_recall == "true",
+        "use_workspace_namespace": use_workspace_namespace == "true",
+        "use_persistent_session": use_persistent_session == "true",
+        "track_tool_usage": track_tool_usage == "true",
+    }
+
+    config["memory"] = memory_config
+    _save_full_config(config)
+
+    return RedirectResponse(url="/config", status_code=303)
+
+
+@app.post("/config/federation")
+async def save_federation_config(
+    enabled: Annotated[str | None, Form()] = None,
+    share_locally: Annotated[str | None, Form()] = None,
+    this_machine_name: Annotated[str, Form()] = "This Machine",
+    api_key: Annotated[str, Form()] = "",
+):
+    """Save federation configuration."""
+    config = _get_full_config()
+
+    # Preserve existing remote dashboards
+    fed_data = config.get("federation", {})
+    existing_remotes = fed_data.get("remote_dashboards", [])
+
+    fed_config = {
+        "enabled": enabled == "true",
+        "share_locally": share_locally == "true",
+        "this_machine_name": this_machine_name.strip() or "This Machine",
+        "api_key": api_key.strip() or None,
+        "remote_dashboards": existing_remotes,
+    }
+
+    config["federation"] = fed_config
+    _save_full_config(config)
+
+    return RedirectResponse(url="/config", status_code=303)
+
+
+@app.post("/config/federation/remotes/add")
+async def add_remote_dashboard(
+    url: Annotated[str, Form()],
+    name: Annotated[str, Form()],
+    remote_api_key: Annotated[str, Form()] = "",
+):
+    """Add a remote dashboard."""
+    config = _get_full_config()
+
+    fed_data = config.get("federation", {})
+    remotes = fed_data.get("remote_dashboards", [])
+
+    # Add new remote
+    new_remote = {
+        "url": url.strip().rstrip("/"),
+        "name": name.strip(),
+        "api_key": remote_api_key.strip() or None,
+        "is_healthy": True,
+    }
+    remotes.append(new_remote)
+
+    fed_data["remote_dashboards"] = remotes
+    config["federation"] = fed_data
+    _save_full_config(config)
+
+    return RedirectResponse(url="/config", status_code=303)
+
+
+@app.post("/config/federation/remotes/delete")
+async def delete_remote_dashboard(
+    index: Annotated[int, Form()],
+):
+    """Delete a remote dashboard by index."""
+    config = _get_full_config()
+
+    fed_data = config.get("federation", {})
+    remotes = fed_data.get("remote_dashboards", [])
+
+    if 0 <= index < len(remotes):
+        remotes.pop(index)
+        fed_data["remote_dashboards"] = remotes
+        config["federation"] = fed_data
+        _save_full_config(config)
+
+    return RedirectResponse(url="/config", status_code=303)
+
+
 def _get_full_config() -> dict:
     """Get full config from file."""
     import json
@@ -479,6 +728,13 @@ def _get_full_config() -> dict:
         except Exception:
             pass
     return {}
+
+
+def _get_federation_config() -> FederationConfig:
+    """Get federation config from the main config file."""
+    config = _get_full_config()
+    fed_data = config.get("federation", {})
+    return FederationConfig.from_dict(fed_data)
 
 
 def _save_full_config(config: dict) -> None:
@@ -1502,7 +1758,649 @@ def render_dashboard(sessions: list, dark_mode: str | None, sort_by: str = "rece
     """
 
 
-def render_config_page(dark_mode: str | None, loop_prompts: dict[str, dict[str, str]], config: dict) -> str:
+def _get_swimlane_styles() -> str:
+    """Get additional CSS for swim lane layout."""
+    return """
+    <style>
+        .swim-lanes-container {
+            display: flex;
+            gap: 1rem;
+            overflow-x: auto;
+            scroll-snap-type: x mandatory;
+            -webkit-overflow-scrolling: touch;
+            padding-bottom: 1rem;
+            min-height: calc(100vh - 200px);
+        }
+        .swim-lane {
+            flex: 0 0 340px;
+            max-width: 90vw;
+            scroll-snap-align: start;
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            display: flex;
+            flex-direction: column;
+            border: 1px solid var(--border-color);
+        }
+        .swim-lane.offline {
+            opacity: 0.7;
+        }
+        .swim-lane.offline .swim-lane-sessions {
+            filter: grayscale(30%);
+        }
+        .swim-lane-header {
+            position: sticky;
+            top: 0;
+            padding: 1rem;
+            border-bottom: 1px solid var(--border-color);
+            background: var(--bg-secondary);
+            border-radius: 12px 12px 0 0;
+            z-index: 1;
+        }
+        .swim-lane-title {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+        .swim-lane-status {
+            font-size: 0.85em;
+            color: var(--text-secondary);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .swim-lane-status .status-indicator {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+        }
+        .swim-lane-status .status-indicator.online { background: var(--status-active); }
+        .swim-lane-status .status-indicator.offline { background: var(--status-stopped); }
+        .swim-lane-sessions {
+            flex: 1;
+            overflow-y: auto;
+            padding: 0.75rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+            max-height: calc(100vh - 280px);
+        }
+        .swim-lane .session-card {
+            margin: 0;
+        }
+        .swim-lane .btn-new-session {
+            width: 100%;
+            margin-top: 8px;
+            padding: 8px 12px;
+            font-size: 0.9em;
+        }
+        .swim-lane-indicators {
+            display: none;
+            justify-content: center;
+            gap: 8px;
+            padding: 12px 0;
+        }
+        .swim-lane-indicators .indicator {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--border-color);
+            border: none;
+            cursor: pointer;
+            padding: 0;
+        }
+        .swim-lane-indicators .indicator.active {
+            background: var(--accent);
+        }
+        @media (min-width: 768px) {
+            .swim-lane {
+                flex: 1 1 340px;
+                max-width: 450px;
+            }
+        }
+        @media (max-width: 767px) {
+            .swim-lanes-container {
+                padding-left: 0.5rem;
+                margin-right: -12px;
+                padding-right: 15%;
+            }
+            .swim-lane {
+                flex: 0 0 85vw;
+            }
+            .swim-lane-indicators {
+                display: flex;
+            }
+        }
+        .new-session-overlay {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.7);
+            z-index: 100;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        .new-session-overlay.active {
+            display: flex;
+        }
+        .new-session-modal {
+            background: var(--bg-secondary);
+            padding: 24px;
+            border-radius: 12px;
+            max-width: 500px;
+            width: 100%;
+            border: 1px solid var(--border-color);
+        }
+        .new-session-modal h3 {
+            margin-bottom: 16px;
+        }
+        .new-session-modal .machine-label {
+            color: var(--accent);
+            font-size: 0.9em;
+            margin-bottom: 16px;
+        }
+    </style>
+    """
+
+
+def _render_swim_lane(
+    lane_id: str,
+    name: str,
+    sessions: list,
+    is_online: bool,
+    is_local: bool,
+    origin_url: str | None = None,
+) -> str:
+    """Render a single swim lane with its sessions."""
+    status_class = "online" if is_online else "offline"
+    status_text = "Online" if is_online else "Offline"
+    lane_class = "swim-lane" + (" offline" if not is_online else "")
+    session_count = len(sessions)
+
+    # Build session cards for this lane
+    session_cards = ""
+    for s in sessions:
+        # Handle both AgentSession objects and RemoteSession objects
+        if hasattr(s, 'status') and hasattr(s.status, 'value'):
+            status_val = s.status.value
+        elif hasattr(s, 'status'):
+            status_val = s.status
+        else:
+            status_val = "stopped"
+
+        session_id = s.session_id
+        workspace_name = html.escape(s.workspace_name)
+        preview = html.escape(s.last_message_preview or "No messages yet")[:80]
+        msg_count = getattr(s, 'message_count', 0)
+
+        session_cards += f'''
+        <a href="/session/{session_id}" class="session-card">
+            <div class="status-dot status-{status_val}"></div>
+            <div class="session-info">
+                <h3>{workspace_name}</h3>
+                <div class="preview">{preview}</div>
+                <div class="session-meta">
+                    <span>{msg_count} messages</span>
+                </div>
+            </div>
+        </a>
+        '''
+
+    # New session button - different action for local vs remote
+    if is_local:
+        new_session_btn = f'''
+        <button onclick="openNewSession('local', '{html.escape(name)}')" class="btn-new-session" style="background:var(--accent);color:white;border:none;border-radius:8px;cursor:pointer;">
+            ➕ New Session
+        </button>
+        '''
+    else:
+        disabled = ' disabled style="opacity:0.5;cursor:not-allowed;background:var(--border-color);color:var(--text-secondary);border:none;border-radius:8px;"' if not is_online else f' onclick="openNewSession(\'{html.escape(origin_url or "")}\', \'{html.escape(name)}\')" style="background:var(--accent);color:white;border:none;border-radius:8px;cursor:pointer;"'
+        new_session_btn = f'''
+        <button class="btn-new-session"{disabled}>
+            ➕ New Session
+        </button>
+        '''
+
+    return f'''
+    <div class="{lane_class}" data-lane-id="{lane_id}" data-origin="{origin_url or 'local'}">
+        <div class="swim-lane-header">
+            <div class="swim-lane-title">
+                💻 {html.escape(name)}
+            </div>
+            <div class="swim-lane-status">
+                <span class="status-indicator {status_class}"></span>
+                {status_text} · {session_count} session{"s" if session_count != 1 else ""}
+            </div>
+            {new_session_btn}
+        </div>
+        <div class="swim-lane-sessions" id="lane-sessions-{lane_id}">
+            {session_cards if session_cards else '<div style="color:var(--text-secondary);text-align:center;padding:20px;">No sessions</div>'}
+        </div>
+    </div>
+    '''
+
+
+def render_dashboard_swimlanes(
+    local_sessions: list,
+    remote_sessions_by_origin: dict,
+    fed_config: FederationConfig,
+    dark_mode: str | None,
+    sort_by: str = "recent",
+) -> str:
+    """Render the dashboard with swim lanes for multiple machines."""
+    styles = get_base_styles(dark_mode)
+    swimlane_styles = _get_swimlane_styles()
+
+    dark_param = f"&dark={dark_mode}" if dark_mode else ""
+    recent_active = "font-weight:bold;" if sort_by == "recent" else ""
+    name_active = "font-weight:bold;" if sort_by == "name" else ""
+
+    # Build swim lanes HTML
+    lanes_html = ""
+    lane_indicators = ""
+    lane_index = 0
+
+    # Local machine lane
+    lanes_html += _render_swim_lane(
+        lane_id="local",
+        name=fed_config.this_machine_name,
+        sessions=local_sessions,
+        is_online=True,
+        is_local=True,
+    )
+    lane_indicators += f'<button class="indicator active" data-lane="{lane_index}"></button>'
+    lane_index += 1
+
+    # Remote machine lanes
+    for remote in fed_config.remote_dashboards:
+        remote_data = remote_sessions_by_origin.get(remote.url, {})
+        sessions = remote_data.get("sessions", []) if remote_data else []
+        is_online = remote.is_healthy
+
+        lanes_html += _render_swim_lane(
+            lane_id=f"remote-{lane_index}",
+            name=remote.name,
+            sessions=sessions,
+            is_online=is_online,
+            is_local=False,
+            origin_url=remote.url,
+        )
+        lane_indicators += f'<button class="indicator" data-lane="{lane_index}"></button>'
+        lane_index += 1
+
+    return f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Augment Agent Dashboard</title>
+        <link rel="manifest" href="/manifest.json">
+        <meta name="apple-mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+        <meta name="apple-mobile-web-app-title" content="Augment">
+        <link rel="apple-touch-icon" href="/icon-192.png">
+        <meta name="theme-color" content="#6366f1">
+        {styles}
+        {swimlane_styles}
+    </head>
+    <body>
+        <div class="header">
+            <h1>🤖 Augment Agent Dashboard</h1>
+            <div class="nav-links">
+                <a href="?sort=recent{dark_param}" style="{recent_active}">Recent</a>
+                <a href="?sort=name{dark_param}" style="{name_active}">Name</a>
+                <a href="?dark=true&sort={sort_by}">🌙</a>
+                <a href="?dark=false&sort={sort_by}">☀️</a>
+                <a href="/config">⚙️ Config</a>
+            </div>
+        </div>
+
+        <div id="notification-banner" style="display:none;background:var(--accent);color:white;padding:10px 15px;border-radius:8px;margin-bottom:15px;cursor:pointer;">
+            🔔 <span id="notification-text">Enable browser notifications</span>
+        </div>
+
+        <div class="swim-lanes-container" id="swim-lanes">
+            {lanes_html}
+        </div>
+
+        <div class="swim-lane-indicators">
+            {lane_indicators}
+        </div>
+
+        <!-- New Session Modal -->
+        <div id="new-session-overlay" class="new-session-overlay" onclick="if(event.target===this)closeNewSession()">
+            <div class="new-session-modal">
+                <h3>➕ New Session</h3>
+                <div class="machine-label" id="new-session-machine">on: This Machine</div>
+                <form id="new-session-form" method="POST" action="/session/new">
+                    <input type="hidden" id="new-session-origin" name="origin" value="local">
+                    <div style="margin-bottom:15px;">
+                        <label style="display:block;margin-bottom:5px;font-weight:500;">Working Directory</label>
+                        <input type="text" id="working_directory" name="working_directory" placeholder="/path/to/project" style="width:100%;padding:10px;border:1px solid var(--border-color);border-radius:6px;background:var(--bg-primary);color:var(--text-primary);box-sizing:border-box;">
+                    </div>
+                    <div style="margin-bottom:15px;">
+                        <label style="display:block;margin-bottom:5px;font-weight:500;">Initial Prompt</label>
+                        <textarea id="prompt" name="prompt" rows="4" placeholder="What would you like the agent to do?" style="width:100%;padding:10px;border:1px solid var(--border-color);border-radius:6px;background:var(--bg-primary);color:var(--text-primary);resize:vertical;box-sizing:border-box;"></textarea>
+                    </div>
+                    <div style="display:flex;gap:10px;">
+                        <button type="button" onclick="closeNewSession()" style="flex:1;padding:10px;border:1px solid var(--border-color);border-radius:6px;background:transparent;color:var(--text-primary);cursor:pointer;">Cancel</button>
+                        <button type="submit" style="flex:1;background:var(--accent);color:white;border:none;padding:10px;border-radius:6px;cursor:pointer;">🚀 Start</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <script>
+            {_get_notification_script()}
+            {_get_timestamp_script()}
+
+            // Swim lane scroll indicator updates
+            const swimLanes = document.getElementById('swim-lanes');
+            const indicators = document.querySelectorAll('.swim-lane-indicators .indicator');
+
+            if (swimLanes && indicators.length > 0) {{
+                swimLanes.addEventListener('scroll', () => {{
+                    const scrollLeft = swimLanes.scrollLeft;
+                    const laneWidth = swimLanes.querySelector('.swim-lane').offsetWidth + 16;
+                    const activeIndex = Math.round(scrollLeft / laneWidth);
+
+                    indicators.forEach((ind, i) => {{
+                        ind.classList.toggle('active', i === activeIndex);
+                    }});
+                }});
+
+                indicators.forEach((ind, i) => {{
+                    ind.addEventListener('click', () => {{
+                        const laneWidth = swimLanes.querySelector('.swim-lane').offsetWidth + 16;
+                        swimLanes.scrollTo({{ left: i * laneWidth, behavior: 'smooth' }});
+                    }});
+                }});
+            }}
+
+            // New session modal
+            let currentOrigin = 'local';
+
+            function openNewSession(origin, machineName) {{
+                currentOrigin = origin;
+                document.getElementById('new-session-machine').textContent = 'on: ' + machineName;
+                document.getElementById('new-session-origin').value = origin;
+
+                // Update form action based on origin
+                const form = document.getElementById('new-session-form');
+                if (origin === 'local') {{
+                    form.action = '/session/new';
+                }} else {{
+                    form.action = '/api/federation/proxy/session/new?origin=' + encodeURIComponent(origin);
+                }}
+
+                document.getElementById('new-session-overlay').classList.add('active');
+                document.getElementById('working_directory').focus();
+            }}
+
+            function closeNewSession() {{
+                document.getElementById('new-session-overlay').classList.remove('active');
+            }}
+
+            // Close on Escape
+            document.addEventListener('keydown', (e) => {{
+                if (e.key === 'Escape') closeNewSession();
+            }});
+
+            // AJAX refresh for swim lanes
+            const REFRESH_INTERVAL = 5000;
+            const sortBy = '{sort_by}';
+
+            async function refreshSwimLanes() {{
+                // Skip if modal is open
+                if (document.getElementById('new-session-overlay').classList.contains('active')) {{
+                    scheduleRefresh();
+                    return;
+                }}
+
+                try {{
+                    const response = await fetch('/api/swimlanes-html?sort=' + encodeURIComponent(sortBy));
+                    if (response.ok) {{
+                        const html = await response.text();
+                        document.getElementById('swim-lanes').innerHTML = html;
+                    }}
+                }} catch (e) {{
+                    console.error('Failed to refresh swim lanes:', e);
+                }}
+                scheduleRefresh();
+            }}
+
+            function scheduleRefresh() {{
+                setTimeout(refreshSwimLanes, REFRESH_INTERVAL);
+            }}
+
+            scheduleRefresh();
+        </script>
+    </body>
+    </html>
+    """
+
+
+def _render_memory_config_section(config: dict) -> str:
+    """Render the memory configuration section HTML."""
+    memory_config = config.get("memory", {})
+
+    server_url = html.escape(memory_config.get("server_url", ""))
+    namespace = html.escape(memory_config.get("namespace", "augment"))
+    user_id = html.escape(memory_config.get("user_id", ""))
+    api_key = html.escape(memory_config.get("api_key", ""))
+
+    # Boolean options
+    auto_capture = memory_config.get("auto_capture", True)
+    auto_recall = memory_config.get("auto_recall", True)
+    use_workspace_namespace = memory_config.get("use_workspace_namespace", True)
+    use_persistent_session = memory_config.get("use_persistent_session", True)
+    track_tool_usage = memory_config.get("track_tool_usage", False)
+
+    # Status indicator
+    enabled = bool(server_url)
+    status_color = "var(--status-idle)" if enabled else "var(--text-secondary)"
+    status_text = "Configured" if enabled else "Not configured"
+
+    return f'''
+        <h2>🧠 Agent Memory</h2>
+        <p style="color:var(--text-secondary);margin-bottom:15px;">
+            Configure the Agent Memory Server to persist context across sessions.
+            Settings are applied when hooks run (no restart needed).
+        </p>
+
+        <div class="prompt-card">
+            <div class="memory-status">
+                <span class="status-dot" style="background:{status_color};"></span>
+                <strong>Status: {status_text}</strong>
+            </div>
+
+            <form method="POST" action="/config/memory">
+                <label class="field-label">Memory Server URL:</label>
+                <input type="text" name="server_url" value="{server_url}"
+                       placeholder="http://localhost:8000">
+
+                <label class="field-label">Namespace:</label>
+                <input type="text" name="namespace" value="{namespace}"
+                       placeholder="augment">
+
+                <label class="field-label">User ID:</label>
+                <input type="text" name="user_id" value="{user_id}"
+                       placeholder="your-user-id">
+
+                <label class="field-label">API Key (optional):</label>
+                <input type="password" name="api_key" value="{api_key}"
+                       placeholder="Leave empty if not required">
+
+                <div class="memory-options">
+                    <strong style="display:block;margin-bottom:10px;">Options</strong>
+
+                    <label class="memory-option">
+                        <input type="checkbox" name="auto_capture" value="true"
+                               {"checked" if auto_capture else ""}>
+                        <span>Auto-capture conversations</span>
+                    </label>
+
+                    <label class="memory-option">
+                        <input type="checkbox" name="auto_recall" value="true"
+                               {"checked" if auto_recall else ""}>
+                        <span>Auto-recall relevant memories at session start</span>
+                    </label>
+
+                    <label class="memory-option">
+                        <input type="checkbox" name="use_workspace_namespace" value="true"
+                               {"checked" if use_workspace_namespace else ""}>
+                        <span>Scope memories by workspace</span>
+                    </label>
+
+                    <label class="memory-option">
+                        <input type="checkbox" name="use_persistent_session" value="true"
+                               {"checked" if use_persistent_session else ""}>
+                        <span>Use persistent session IDs</span>
+                    </label>
+
+                    <label class="memory-option" style="margin-bottom:0;">
+                        <input type="checkbox" name="track_tool_usage" value="true"
+                               {"checked" if track_tool_usage else ""}>
+                        <span>Track tool usage as memories</span>
+                    </label>
+                </div>
+
+                <button type="submit" class="btn-enable" style="margin-top:15px;width:100%;">
+                    Save Memory Settings
+                </button>
+            </form>
+        </div>
+    '''
+
+
+def _render_federation_config_section(config: dict) -> str:
+    """Render the federation configuration section HTML."""
+    fed_config = FederationConfig.from_dict(config.get("federation", {}))
+
+    enabled_checked = "checked" if fed_config.enabled else ""
+    share_locally_checked = "checked" if fed_config.share_locally else ""
+    machine_name = html.escape(fed_config.this_machine_name)
+    api_key = html.escape(fed_config.api_key or "")
+
+    # Status indicator
+    num_remotes = len(fed_config.remote_dashboards)
+    if fed_config.enabled:
+        status_color = "var(--status-idle)"
+        plural = "s" if num_remotes != 1 else ""
+        status_text = f"Enabled ({num_remotes} remote{plural})"
+    else:
+        status_color = "var(--text-secondary)"
+        status_text = "Disabled"
+
+    # Build remotes list HTML
+    remotes_html = ""
+    for i, remote in enumerate(fed_config.remote_dashboards):
+        health_color = "var(--status-idle)" if remote.is_healthy else "var(--status-active)"
+        health_icon = "✓" if remote.is_healthy else "✗"
+        escaped_name = html.escape(remote.name)
+        escaped_url = html.escape(remote.url)
+        remotes_html += f'''
+            <div class="remote-item">
+                <div class="remote-info">
+                    <span class="remote-health" style="color:{health_color};">
+                        {health_icon}
+                    </span>
+                    <strong>{escaped_name}</strong>
+                    <span class="remote-url">{escaped_url}</span>
+                </div>
+                <form method="POST" action="/config/federation/remotes/delete"
+                      style="margin:0;">
+                    <input type="hidden" name="index" value="{i}">
+                    <button type="submit" class="btn-delete-remote">Remove</button>
+                </form>
+            </div>
+        '''
+
+    if not remotes_html:
+        remotes_html = (
+            '<p style="color:var(--text-secondary);margin:10px 0;">'
+            "No remote dashboards configured.</p>"
+        )
+
+    return f'''
+        <h2>🌐 Federation Settings</h2>
+        <p style="color:var(--text-secondary);margin-bottom:15px;">
+            Configure federation to connect multiple dashboards across machines.
+        </p>
+
+        <div class="prompt-card">
+            <div class="memory-status">
+                <span class="status-dot" style="background:{status_color};"></span>
+                <strong>Status: {status_text}</strong>
+            </div>
+
+            <form method="POST" action="/config/federation">
+                <div class="memory-options" style="margin-bottom:15px;">
+                    <label class="memory-option">
+                        <input type="checkbox" name="enabled" value="true" {enabled_checked}>
+                        <span>Enable federation</span>
+                    </label>
+
+                    <label class="memory-option">
+                        <input type="checkbox" name="share_locally" value="true"
+                               {share_locally_checked}>
+                        <span>Share sessions with other dashboards</span>
+                    </label>
+                </div>
+
+                <label class="field-label">This Machine's Name:</label>
+                <input type="text" name="this_machine_name" value="{machine_name}"
+                       placeholder="e.g., Work Laptop">
+
+                <label class="field-label">API Key (for incoming connections):</label>
+                <input type="password" name="api_key" value="{api_key}"
+                       placeholder="Leave empty for no authentication">
+
+                <button type="submit" class="btn-enable" style="margin-top:15px;width:100%;">
+                    Save Federation Settings
+                </button>
+            </form>
+        </div>
+
+        <div class="prompt-card" style="margin-top:20px;">
+            <h3 style="margin-top:0;">Remote Dashboards</h3>
+            <p style="color:var(--text-secondary);font-size:0.9em;margin-bottom:15px;">
+                Add other machines' dashboards to see their sessions.
+            </p>
+
+            <div class="remotes-list">
+                {remotes_html}
+            </div>
+
+            <hr style="margin:15px 0;border:none;border-top:1px solid var(--border-color);">
+
+            <form method="POST" action="/config/federation/remotes/add">
+                <label class="field-label">Dashboard URL:</label>
+                <input type="text" name="url" placeholder="http://other-machine:8080" required>
+
+                <label class="field-label">Name:</label>
+                <input type="text" name="name" placeholder="e.g., Home Desktop" required>
+
+                <label class="field-label">API Key (if required):</label>
+                <input type="password" name="remote_api_key"
+                       placeholder="Leave empty if not required">
+
+                <button type="submit" class="btn-enable" style="margin-top:10px;width:100%;">
+                    Add Remote Dashboard
+                </button>
+            </form>
+        </div>
+    '''
+
+
+def render_config_page(
+    dark_mode: str | None,
+    loop_prompts: dict[str, dict[str, str]],
+    config: dict,
+) -> str:
     """Render the configuration page HTML."""
     styles = get_base_styles(dark_mode)
 
@@ -1621,6 +2519,67 @@ def render_config_page(dark_mode: str | None, loop_prompts: dict[str, dict[str, 
                 min-height: 80px;
                 margin-bottom: 10px;
             }}
+            .memory-status {{
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                margin-bottom: 12px;
+            }}
+            .status-dot {{
+                width: 10px;
+                height: 10px;
+                border-radius: 50%;
+            }}
+            .memory-options {{
+                margin-top: 15px;
+                padding: 12px;
+                background: var(--bg-primary);
+                border-radius: 8px;
+            }}
+            .memory-option {{
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                margin-bottom: 8px;
+                cursor: pointer;
+            }}
+            .remotes-list {{
+                margin: 10px 0;
+            }}
+            .remote-item {{
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                padding: 10px 12px;
+                background: var(--bg-primary);
+                border-radius: 6px;
+                margin-bottom: 8px;
+            }}
+            .remote-info {{
+                display: flex;
+                align-items: center;
+                gap: 10px;
+            }}
+            .remote-health {{
+                font-size: 1.1em;
+            }}
+            .remote-url {{
+                color: var(--text-secondary);
+                font-size: 0.9em;
+            }}
+            .btn-delete-remote {{
+                padding: 4px 10px;
+                background: transparent;
+                color: var(--status-active);
+                border: 1px solid var(--status-active);
+                border-radius: 4px;
+                cursor: pointer;
+                font-size: 0.85em;
+            }}
+            .btn-delete-remote:hover {{
+                background: var(--status-active);
+                color: white;
+            }}
         </style>
     </head>
     <body>
@@ -1647,6 +2606,14 @@ def render_config_page(dark_mode: str | None, loop_prompts: dict[str, dict[str, 
                 <button type="submit" class="btn-enable" style="width:100%;">Add Prompt</button>
             </form>
         </div>
+
+        <hr style="margin: 30px 0; border: none; border-top: 1px solid var(--border-color);">
+
+        {_render_federation_config_section(config)}
+
+        <hr style="margin: 30px 0; border: none; border-top: 1px solid var(--border-color);">
+
+        {_render_memory_config_section(config)}
     </body>
     </html>
     """
@@ -2058,6 +3025,33 @@ def render_session_detail(session, dark_mode: str | None, loop_prompts: dict[str
             if (messageList) {{
                 messageList.scrollTop = messageList.scrollHeight;
             }}
+
+            // Cmd+Enter (Mac) or Ctrl+Enter (Windows/Linux) to send/queue message
+            document.addEventListener('keydown', function(e) {{
+                if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {{
+                    const textarea = document.getElementById('message-input');
+                    if (!textarea || !textarea.value.trim()) return;
+
+                    // Find the form containing the textarea
+                    const form = textarea.closest('form');
+                    if (!form) return;
+
+                    e.preventDefault();
+
+                    // Check if there's a "Send Now" button (session is IDLE)
+                    const sendBtn = form.querySelector('button[type="submit"]:not(.btn-queue)');
+                    if (sendBtn) {{
+                        // Session is idle - submit via send button
+                        form.submit();
+                    }} else {{
+                        // Session is active or only queue available - submit to queue
+                        const queueBtn = form.querySelector('.btn-queue');
+                        if (queueBtn) {{
+                            form.submit();
+                        }}
+                    }}
+                }}
+            }});
         </script>
     </body>
     </html>

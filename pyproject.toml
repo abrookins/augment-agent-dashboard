@@ -10,6 +10,8 @@ dependencies = [
     "psutil>=7.2.2",
     "uvicorn[standard]>=0.27.0",
     "python-multipart>=0.0.22",
+    "httpx>=0.28.1",
+    "augment-agent-memory",
 ]
 
 [project.optional-dependencies]
@@ -45,6 +47,9 @@ select = ["E", "F", "I", "W"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.uv.sources]
+augment-agent-memory = { path = "../augment-agent-memory" }
 
 [dependency-groups]
 dev = [

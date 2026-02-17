@@ -1,7 +1,10 @@
-"""Install Augment hooks for the dashboard plugin."""
+"""Install Augment hooks for the dashboard plugin.
+
+This installer sets up both the dashboard hooks AND the agent-memory hooks
+so that sessions are tracked in the dashboard and memories are captured.
+"""
 
 import json
-import os
 import shutil
 import stat
 import sys
@@ -90,7 +93,12 @@ def install_hooks() -> None:
     # Dashboard hook identifier - used to find and update our hooks
     DASHBOARD_MARKER = "/dashboard/hooks/"
 
-    def add_or_update_hook(hook_type: str, script_path: str, timeout: int = 5000, metadata: dict | None = None):
+    def add_or_update_hook(
+        hook_type: str,
+        script_path: str,
+        timeout: int = 5000,
+        metadata: dict | None = None,
+    ):
         """Add or update a dashboard hook without removing other hooks."""
         if hook_type not in settings["hooks"]:
             settings["hooks"][hook_type] = []
@@ -102,7 +110,8 @@ def install_hooks() -> None:
         for i, entry in enumerate(hook_list):
             if "hooks" in entry:
                 for hook in entry["hooks"]:
-                    if hook.get("type") == "command" and DASHBOARD_MARKER in hook.get("command", ""):
+                    cmd = hook.get("command", "")
+                    if hook.get("type") == "command" and DASHBOARD_MARKER in cmd:
                         dashboard_entry_idx = i
                         break
             if dashboard_entry_idx is not None:
@@ -157,14 +166,73 @@ def install_hooks() -> None:
             print(f"Removed old config: {old_path}")
 
     print("\nDashboard hooks installed successfully!")
-    print("\nTo start the dashboard:")
-    print("  augment-dashboard")
-    print("\nThen open http://localhost:8080 in your browser.")
+
+
+def install_memory_hooks(enable_tool_tracking: bool = False) -> bool:
+    """Install the agent-memory hooks.
+
+    Returns True if successful, False if the memory plugin is not available.
+    """
+    try:
+        from augment_agent_memory.install import (
+            create_hook_scripts,
+            get_hooks_dir,
+            update_augment_settings,
+        )
+    except ImportError:
+        print("\nNote: augment-agent-memory not found, skipping memory hooks")
+        return False
+
+    print("\nInstalling Agent Memory hooks...")
+
+    # Create memory hook scripts
+    hooks_dir = get_hooks_dir()
+    scripts = create_hook_scripts(hooks_dir, use_fixed_python=True)
+    print(f"Created memory hook scripts in: {hooks_dir}")
+
+    # Update settings with memory hooks
+    update_augment_settings(scripts, enable_tool_tracking=enable_tool_tracking)
+
+    print("Memory hooks installed successfully!")
+    return True
 
 
 def main():
     """Main entry point."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Install Augment Agent Dashboard hooks (includes memory integration)"
+    )
+    parser.add_argument(
+        "--skip-memory",
+        action="store_true",
+        help="Skip installing agent-memory hooks",
+    )
+    parser.add_argument(
+        "--enable-memory-tool-tracking",
+        action="store_true",
+        help="Enable PostToolUse hook for memory tool usage tracking",
+    )
+    args = parser.parse_args()
+
+    # Install dashboard hooks
     install_hooks()
+
+    # Install memory hooks (unless skipped)
+    if not args.skip_memory:
+        memory_installed = install_memory_hooks(
+            enable_tool_tracking=args.enable_memory_tool_tracking
+        )
+        if memory_installed:
+            print("\nMemory server configuration:")
+            print("  export AGENT_MEMORY_SERVER_URL=http://localhost:8000")
+            print("  export AGENT_MEMORY_NAMESPACE=augment")
+            print("  export AGENT_MEMORY_USER_ID=your-user-id")
+
+    print("\nTo start the dashboard:")
+    print("  augment-dashboard")
+    print("\nThen open http://localhost:8080 in your browser.")
 
 
 if __name__ == "__main__":
