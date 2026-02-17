@@ -24,6 +24,52 @@ def _generate_federated_session_id(origin_url: str, remote_session_id: str) -> s
     return f"remote-{url_hash}-{remote_session_id}"
 
 
+def is_remote_session_id(session_id: str) -> bool:
+    """Check if a session ID is for a remote session."""
+    return session_id.startswith("remote-")
+
+
+def parse_remote_session_id(session_id: str) -> tuple[str, str] | None:
+    """Parse a federated session ID to extract the hash and original ID.
+
+    Args:
+        session_id: A federated session ID like "remote-abc12345-original-session-id"
+
+    Returns:
+        Tuple of (url_hash, remote_session_id) or None if invalid format.
+    """
+    if not is_remote_session_id(session_id):
+        return None
+
+    # Format: remote-{8 char hash}-{original_id}
+    # The original_id may contain dashes
+    parts = session_id.split("-", 2)  # Split into at most 3 parts
+    if len(parts) < 3:
+        return None
+
+    # parts = ["remote", "hash", "original-id-rest"]
+    url_hash = parts[1]
+    remote_session_id = parts[2]
+    return (url_hash, remote_session_id)
+
+
+def find_remote_by_hash(remotes: list, url_hash: str):
+    """Find a remote dashboard by its URL hash.
+
+    Args:
+        remotes: List of RemoteDashboard objects
+        url_hash: The 8-character hash of the URL
+
+    Returns:
+        The matching RemoteDashboard or None.
+    """
+    for remote in remotes:
+        computed_hash = hashlib.md5(remote.url.encode()).hexdigest()[:8]
+        if computed_hash == url_hash:
+            return remote
+    return None
+
+
 class RemoteDashboardClient:
     """Client for communicating with remote dashboard servers."""
 
@@ -143,6 +189,34 @@ class RemoteDashboardClient:
         except Exception as e:
             logger.warning(f"Failed to send message to {self.remote.name}: {e}")
             return False
+
+    async def fetch_session_detail(self, remote_session_id: str) -> dict | None:
+        """Fetch full details of a single session from the remote dashboard.
+
+        Args:
+            remote_session_id: The original session ID on the remote.
+
+        Returns:
+            Session data dict if successful, None otherwise.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+                response = await client.get(
+                    f"{self.base_url}/api/federation/sessions/{remote_session_id}",
+                    headers=self._get_headers(),
+                )
+
+                if response.status_code != 200:
+                    logger.warning(
+                        f"Failed to fetch session {remote_session_id} from {self.remote.name}: "
+                        f"{response.status_code}"
+                    )
+                    return None
+
+                return response.json()
+        except Exception as e:
+            logger.warning(f"Error fetching session from {self.remote.name}: {e}")
+            return None
 
     async def create_session(self, workspace_root: str, prompt: str) -> dict | None:
         """Create a new session on the remote dashboard.
