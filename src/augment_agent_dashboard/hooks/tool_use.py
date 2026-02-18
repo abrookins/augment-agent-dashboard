@@ -5,7 +5,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ..models import SessionMessage, SessionStatus
+from ..models import SessionMessage
 from ..store import SessionStore
 
 # Config path
@@ -45,7 +45,7 @@ def run_hook(hook_type: str = "PreToolUse"):
     conversation_id = hook_input.get("conversation_id", "unknown")
     tool_use = hook_input.get("toolUse", {})
 
-    workspace_root = get_workspace_root(workspace_roots)
+    get_workspace_root(workspace_roots)  # Currently unused, but may be needed for validation
     session_id = get_session_id(conversation_id)
 
     tool_name = tool_use.get("name", "unknown")
@@ -65,7 +65,8 @@ def run_hook(hook_type: str = "PreToolUse"):
 
             # For PostToolUse, we could also capture the result
             if hook_type == "PostToolUse":
-                tool_output = tool_use.get("output", "")
+                # Note: tool_output could be used to show results in the future
+                # tool_output = tool_use.get("output", "")
                 # Add a system message showing tool execution
                 tool_msg = f"🔧 **{tool_name}**"
                 if tool_input:

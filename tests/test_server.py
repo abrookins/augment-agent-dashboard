@@ -2,7 +2,7 @@
 
 import tempfile
 from pathlib import Path
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -536,7 +536,11 @@ class TestGetLoopPrompts:
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
         config_dir = tmp_path / ".augment" / "dashboard"
         config_dir.mkdir(parents=True)
-        (config_dir / "config.json").write_text('{"loop_prompts": {"test": {"prompt": "test prompt", "end_condition": "DONE"}}}')
+        config_json = (
+            '{"loop_prompts": {"test": '
+            '{"prompt": "test prompt", "end_condition": "DONE"}}}'
+        )
+        (config_dir / "config.json").write_text(config_json)
 
         result = _get_loop_prompts()
         assert "test" in result
@@ -631,7 +635,8 @@ class TestFormatTimeAgo:
 
     def test_format_time_ago_just_now(self):
         """Test time less than a minute ago."""
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timedelta, timezone
+
         from augment_agent_dashboard.server import format_time_ago
 
         now = datetime.now(timezone.utc)
@@ -640,7 +645,8 @@ class TestFormatTimeAgo:
 
     def test_format_time_ago_minutes(self):
         """Test time minutes ago."""
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timedelta, timezone
+
         from augment_agent_dashboard.server import format_time_ago
 
         now = datetime.now(timezone.utc)
@@ -649,7 +655,8 @@ class TestFormatTimeAgo:
 
     def test_format_time_ago_hours(self):
         """Test time hours ago."""
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timedelta, timezone
+
         from augment_agent_dashboard.server import format_time_ago
 
         now = datetime.now(timezone.utc)
@@ -658,7 +665,8 @@ class TestFormatTimeAgo:
 
     def test_format_time_ago_yesterday(self):
         """Test time yesterday."""
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timedelta, timezone
+
         from augment_agent_dashboard.server import format_time_ago
 
         now = datetime.now(timezone.utc)
@@ -667,7 +675,8 @@ class TestFormatTimeAgo:
 
     def test_format_time_ago_days(self):
         """Test time days ago."""
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timedelta, timezone
+
         from augment_agent_dashboard.server import format_time_ago
 
         now = datetime.now(timezone.utc)
@@ -676,7 +685,8 @@ class TestFormatTimeAgo:
 
     def test_format_time_ago_weeks(self):
         """Test time weeks ago."""
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timedelta, timezone
+
         from augment_agent_dashboard.server import format_time_ago
 
         now = datetime.now(timezone.utc)
@@ -688,7 +698,8 @@ class TestFormatTimeAgo:
 
     def test_format_time_ago_with_title(self):
         """Test format_time_ago with include_title=True returns HTML."""
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timedelta, timezone
+
         from augment_agent_dashboard.server import format_time_ago
 
         now = datetime.now(timezone.utc)
@@ -701,6 +712,7 @@ class TestFormatTimeAgo:
     def test_format_time_ago_naive_datetime(self):
         """Test with naive datetime (no timezone)."""
         from datetime import datetime, timedelta, timezone
+
         from augment_agent_dashboard.server import format_time_ago
 
         # Create a naive datetime that's 10 minutes before UTC now
@@ -774,7 +786,7 @@ class TestLoadLoopPrompts:
 
     def test_load_loop_prompts_no_file(self):
         """Test with no file specified."""
-        from augment_agent_dashboard.server import load_loop_prompts, DEFAULT_LOOP_PROMPTS
+        from augment_agent_dashboard.server import DEFAULT_LOOP_PROMPTS, load_loop_prompts
         result = load_loop_prompts(None)
         assert result == DEFAULT_LOOP_PROMPTS
 
@@ -790,7 +802,7 @@ class TestLoadLoopPrompts:
 
     def test_load_loop_prompts_invalid_file(self, tmp_path):
         """Test with invalid file."""
-        from augment_agent_dashboard.server import load_loop_prompts, DEFAULT_LOOP_PROMPTS
+        from augment_agent_dashboard.server import DEFAULT_LOOP_PROMPTS, load_loop_prompts
         prompts_file = tmp_path / "prompts.json"
         prompts_file.write_text('not valid json')
 
@@ -799,7 +811,7 @@ class TestLoadLoopPrompts:
 
     def test_load_loop_prompts_missing_file(self):
         """Test with missing file."""
-        from augment_agent_dashboard.server import load_loop_prompts, DEFAULT_LOOP_PROMPTS
+        from augment_agent_dashboard.server import DEFAULT_LOOP_PROMPTS, load_loop_prompts
         result = load_loop_prompts("/nonexistent/file.json")
         assert result == DEFAULT_LOOP_PROMPTS
 
@@ -810,6 +822,7 @@ class TestSaveConfig:
     def test_save_config(self, tmp_path, monkeypatch):
         """Test saving config."""
         import json
+
         from augment_agent_dashboard.server import save_config
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
 
@@ -835,7 +848,8 @@ class TestFormatElapsedTime:
 
     def test_format_elapsed_time_seconds(self):
         """Test with seconds only."""
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timedelta, timezone
+
         from augment_agent_dashboard.server import _format_elapsed_time
 
         started = datetime.now(timezone.utc) - timedelta(seconds=30)
@@ -844,7 +858,8 @@ class TestFormatElapsedTime:
 
     def test_format_elapsed_time_minutes(self):
         """Test with minutes."""
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timedelta, timezone
+
         from augment_agent_dashboard.server import _format_elapsed_time
 
         started = datetime.now(timezone.utc) - timedelta(minutes=5, seconds=30)
@@ -853,7 +868,8 @@ class TestFormatElapsedTime:
 
     def test_format_elapsed_time_hours(self):
         """Test with hours."""
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timedelta, timezone
+
         from augment_agent_dashboard.server import _format_elapsed_time
 
         started = datetime.now(timezone.utc) - timedelta(hours=2, minutes=30)
@@ -862,7 +878,8 @@ class TestFormatElapsedTime:
 
     def test_format_elapsed_time_naive_datetime(self):
         """Test with naive datetime."""
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timedelta, timezone
+
         from augment_agent_dashboard.server import _format_elapsed_time
 
         utc_now = datetime.now(timezone.utc)
@@ -876,8 +893,8 @@ class TestRenderMessageForm:
 
     def test_render_message_form_active(self, sample_session):
         """Test rendering form for active session."""
-        from augment_agent_dashboard.server import _render_message_form
         from augment_agent_dashboard.models import SessionStatus
+        from augment_agent_dashboard.server import _render_message_form
 
         sample_session.status = SessionStatus.ACTIVE
         result = _render_message_form(sample_session)
@@ -885,8 +902,8 @@ class TestRenderMessageForm:
 
     def test_render_message_form_idle(self, sample_session):
         """Test rendering form for idle session."""
-        from augment_agent_dashboard.server import _render_message_form
         from augment_agent_dashboard.models import SessionStatus
+        from augment_agent_dashboard.server import _render_message_form
 
         sample_session.status = SessionStatus.IDLE
         result = _render_message_form(sample_session)
@@ -894,8 +911,8 @@ class TestRenderMessageForm:
 
     def test_render_message_form_with_queued(self, sample_session):
         """Test rendering form with queued messages."""
+        from augment_agent_dashboard.models import SessionMessage, SessionStatus
         from augment_agent_dashboard.server import _render_message_form
-        from augment_agent_dashboard.models import SessionStatus, SessionMessage
 
         sample_session.status = SessionStatus.ACTIVE
         sample_session.messages = [
@@ -919,8 +936,8 @@ class TestRenderSessionDetail:
 
     def test_render_session_detail_with_messages(self, sample_session):
         """Test rendering session with messages."""
-        from augment_agent_dashboard.server import render_session_detail
         from augment_agent_dashboard.models import SessionMessage
+        from augment_agent_dashboard.server import render_session_detail
 
         sample_session.messages = [
             SessionMessage(role="user", content="Hello"),
@@ -932,8 +949,8 @@ class TestRenderSessionDetail:
 
     def test_render_session_detail_with_queued(self, sample_session):
         """Test rendering session with queued messages."""
-        from augment_agent_dashboard.server import render_session_detail
         from augment_agent_dashboard.models import SessionMessage
+        from augment_agent_dashboard.server import render_session_detail
 
         sample_session.messages = [
             SessionMessage(role="queued", content="Queued message"),
@@ -961,6 +978,7 @@ class TestRenderLoopControls:
     def test_render_loop_controls_enabled(self, sample_session):
         """Test rendering loop controls when enabled."""
         from datetime import datetime, timezone
+
         from augment_agent_dashboard.server import _render_loop_controls
 
         sample_session.loop_enabled = True
@@ -987,6 +1005,7 @@ class TestMain:
     def test_main_default_args(self, tmp_path, monkeypatch):
         """Test main with default arguments."""
         import sys
+
         from augment_agent_dashboard import server
 
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
@@ -1008,6 +1027,7 @@ class TestMain:
     def test_main_custom_port(self, tmp_path, monkeypatch):
         """Test main with custom port."""
         import sys
+
         from augment_agent_dashboard import server
 
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
@@ -1024,8 +1044,9 @@ class TestMain:
 
     def test_main_no_sound(self, tmp_path, monkeypatch):
         """Test main with --no-sound flag."""
-        import sys
         import json
+        import sys
+
         from augment_agent_dashboard import server
 
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
@@ -1041,8 +1062,9 @@ class TestMain:
 
     def test_main_with_loop_prompts_file(self, tmp_path, monkeypatch):
         """Test main with custom loop prompts file."""
-        import sys
         import json
+        import sys
+
         from augment_agent_dashboard import server
 
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
@@ -1051,7 +1073,8 @@ class TestMain:
         prompts_file = tmp_path / "prompts.json"
         prompts_file.write_text('{"Custom": "custom prompt"}')
 
-        monkeypatch.setattr(sys, "argv", ["augment-dashboard", "--loop-prompts-file", str(prompts_file)])
+        argv = ["augment-dashboard", "--loop-prompts-file", str(prompts_file)]
+        monkeypatch.setattr(sys, "argv", argv)
 
         with patch("uvicorn.run"):
             server.main()
@@ -1063,8 +1086,9 @@ class TestMain:
 
     def test_main_max_loop_iterations(self, tmp_path, monkeypatch):
         """Test main with custom max loop iterations."""
-        import sys
         import json
+        import sys
+
         from augment_agent_dashboard import server
 
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
@@ -1081,12 +1105,18 @@ class TestMain:
         """Test running server as __main__."""
         import runpy
         import sys
+        import warnings
 
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
         monkeypatch.setattr(sys, "argv", ["augment-dashboard"])
 
         with patch("uvicorn.run"):
-            runpy.run_module("augment_agent_dashboard.server", run_name="__main__")
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                runpy.run_module(
+                    "augment_agent_dashboard.server",
+                    run_name="__main__"
+                )
 
 
 class TestStaticFileMount:

@@ -1,9 +1,7 @@
 """Tests for session store."""
 
-import json
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -67,7 +65,7 @@ class TestSessionStore:
         """Test that init creates parent directory."""
         with tempfile.TemporaryDirectory() as tmpdir:
             sessions_file = Path(tmpdir) / "subdir" / "sessions.json"
-            store = SessionStore(sessions_file=sessions_file)
+            SessionStore(sessions_file=sessions_file)  # Side effect creates dir
             assert sessions_file.parent.exists()
 
     def test_get_session_not_found(self, temp_store):

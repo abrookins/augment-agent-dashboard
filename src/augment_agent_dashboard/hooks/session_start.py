@@ -4,7 +4,8 @@ import json
 import sys
 from pathlib import Path
 
-from ..models import AgentSession, SessionStatus
+from ..models import AgentSession
+from ..state_machine import get_state_machine
 from ..store import SessionStore
 
 
@@ -78,15 +79,21 @@ def run_hook() -> None:
 
     try:
         store = SessionStore()
+        state_machine = get_state_machine()
 
         # Check if session exists
         existing = store.get_session(session_id)
         dashboard_messages: list[str] = []
 
         if existing:
-            # Update status to active and update PID
-            store.update_session_status(session_id, SessionStatus.ACTIVE)
-            store.update_session_pid(session_id, parent_pid)
+            # Use state machine to transition to ACTIVE
+            result = state_machine.process_event(existing, "session_start")
+            log(f"  State transition: {result.old_state} -> {result.new_state}")
+
+            # Update PID and save session
+            existing.agent_pid = parent_pid
+            store.upsert_session(existing)
+
             # Get and clear any pending dashboard messages
             dashboard_messages = store.get_and_clear_dashboard_messages(session_id)
             if dashboard_messages:
@@ -98,9 +105,11 @@ def run_hook() -> None:
                 conversation_id=conversation_id,
                 workspace_root=workspace_root or "",
                 workspace_name=workspace_name,
-                status=SessionStatus.ACTIVE,
                 agent_pid=parent_pid,
             )
+            # Use state machine to set initial state
+            result = state_machine.process_event(session, "session_start")
+            log(f"  New session state: {result.new_state}")
             store.upsert_session(session)
             log(f"  Registered new session: {session_id}")
 

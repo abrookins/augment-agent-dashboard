@@ -2,14 +2,10 @@
 
 import io
 import json
-from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from augment_agent_dashboard.hooks import session_start, stop, tool_use
-from augment_agent_dashboard.models import AgentSession, SessionMessage, SessionStatus
-from augment_agent_dashboard.store import SessionStore
+from augment_agent_dashboard.models import AgentSession, SessionMessage
 
 
 class TestSessionStartHelpers:
@@ -19,7 +15,8 @@ class TestSessionStartHelpers:
         assert session_start.get_workspace_root([]) is None
 
     def test_get_workspace_root_with_roots(self):
-        assert session_start.get_workspace_root(["/path/to/project", "/other"]) == "/path/to/project"
+        roots = ["/path/to/project", "/other"]
+        assert session_start.get_workspace_root(roots) == "/path/to/project"
 
     def test_get_workspace_name_none(self):
         assert session_start.get_workspace_name(None) == "unknown"
@@ -91,7 +88,9 @@ class TestSessionStartHook:
     @patch("augment_agent_dashboard.hooks.session_start.SessionStore")
     @patch("sys.stdin", new_callable=io.StringIO)
     @patch("psutil.Process")
-    def test_run_hook_new_session(self, mock_process, mock_stdin, mock_store_class, tmp_path, monkeypatch, capsys):
+    def test_run_hook_new_session(
+        self, mock_process, mock_stdin, mock_store_class, tmp_path, monkeypatch, capsys
+    ):
         # Setup mocks
         mock_store = MagicMock()
         mock_store.get_session.return_value = None
@@ -129,7 +128,9 @@ class TestSessionStartHook:
     @patch("augment_agent_dashboard.hooks.session_start.SessionStore")
     @patch("sys.stdin", new_callable=io.StringIO)
     @patch("psutil.Process")
-    def test_run_hook_existing_session_with_messages(self, mock_process, mock_stdin, mock_store_class, tmp_path, monkeypatch, capsys):
+    def test_run_hook_existing_session_with_messages(
+        self, mock_process, mock_stdin, mock_store_class, tmp_path, monkeypatch, capsys
+    ):
         """Test that existing session with dashboard messages outputs them."""
         mock_store = MagicMock()
         existing_session = AgentSession(
@@ -166,7 +167,9 @@ class TestSessionStartHook:
     @patch("augment_agent_dashboard.hooks.session_start.SessionStore")
     @patch("sys.stdin", new_callable=io.StringIO)
     @patch("psutil.Process")
-    def test_run_hook_no_json_input(self, mock_process, mock_stdin, mock_store_class, tmp_path, monkeypatch, capsys):
+    def test_run_hook_no_json_input(
+        self, mock_process, mock_stdin, mock_store_class, tmp_path, monkeypatch, capsys
+    ):
         """Test handling of invalid JSON input."""
         mock_store = MagicMock()
         mock_store.get_session.return_value = None
@@ -192,7 +195,9 @@ class TestSessionStartHook:
     @patch("augment_agent_dashboard.hooks.session_start.SessionStore")
     @patch("sys.stdin", new_callable=io.StringIO)
     @patch("psutil.Process")
-    def test_run_hook_parent_process_error(self, mock_process, mock_stdin, mock_store_class, tmp_path, monkeypatch, capsys):
+    def test_run_hook_parent_process_error(
+        self, mock_process, mock_stdin, mock_store_class, tmp_path, monkeypatch, capsys
+    ):
         """Test handling of parent process error."""
         mock_store = MagicMock()
         mock_store.get_session.return_value = None
@@ -218,7 +223,9 @@ class TestSessionStartHook:
     @patch("augment_agent_dashboard.hooks.session_start.SessionStore")
     @patch("sys.stdin", new_callable=io.StringIO)
     @patch("psutil.Process")
-    def test_run_hook_store_error(self, mock_process, mock_stdin, mock_store_class, tmp_path, monkeypatch, capsys):
+    def test_run_hook_store_error(
+        self, mock_process, mock_stdin, mock_store_class, tmp_path, monkeypatch, capsys
+    ):
         """Test handling of store errors."""
         mock_store = MagicMock()
         mock_store.get_session.side_effect = Exception("Store error")
@@ -380,7 +387,10 @@ class TestStopHook:
     @patch("augment_agent_dashboard.hooks.stop.load_config")
     @patch("augment_agent_dashboard.hooks.stop.SessionStore")
     @patch("sys.stdin", new_callable=io.StringIO)
-    def test_run_hook_new_session(self, mock_stdin, mock_store_class, mock_config, mock_notify, tmp_path, monkeypatch, capsys):
+    def test_run_hook_new_session(
+        self, mock_stdin, mock_store_class, mock_config, mock_notify,
+        tmp_path, monkeypatch, capsys
+    ):
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
         (tmp_path / ".augment" / "dashboard").mkdir(parents=True)
 
@@ -412,7 +422,9 @@ class TestStopHook:
     @patch("augment_agent_dashboard.hooks.stop.load_config")
     @patch("augment_agent_dashboard.hooks.stop.SessionStore")
     @patch("sys.stdin", new_callable=io.StringIO)
-    def test_run_hook_existing_session(self, mock_stdin, mock_store_class, mock_config, mock_notify, tmp_path, monkeypatch):
+    def test_run_hook_existing_session(
+        self, mock_stdin, mock_store_class, mock_config, mock_notify, tmp_path, monkeypatch
+    ):
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
         (tmp_path / ".augment" / "dashboard").mkdir(parents=True)
 
@@ -439,9 +451,10 @@ class TestStopHook:
 
         stop.run_hook()
 
-        # Verify messages were added
-        assert mock_store.add_message.call_count == 2  # user + assistant
-        mock_store.update_session_status.assert_called()
+        # Verify session was upserted (new API adds messages directly to session)
+        mock_store.upsert_session.assert_called()
+        # Verify messages were added to the session object
+        assert len(existing_session.messages) == 2  # user + assistant
 
 
 class TestSendNotification:
@@ -537,7 +550,10 @@ class TestStopHookLoopLogic:
     @patch("augment_agent_dashboard.hooks.stop.load_config")
     @patch("augment_agent_dashboard.hooks.stop.SessionStore")
     @patch("sys.stdin", new_callable=io.StringIO)
-    def test_loop_enabled_increments_count(self, mock_stdin, mock_store_class, mock_config, mock_notify, mock_spawn, tmp_path, monkeypatch):
+    def test_loop_enabled_increments_count(
+        self, mock_stdin, mock_store_class, mock_config, mock_notify, mock_spawn,
+        tmp_path, monkeypatch
+    ):
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
         (tmp_path / ".augment" / "dashboard").mkdir(parents=True)
 
@@ -550,6 +566,8 @@ class TestStopHookLoopLogic:
             loop_enabled=True,
             loop_count=0,
         )
+        # Set state to active so state machine can transition
+        session._state = "active"
         mock_store.get_session.return_value = session
         mock_store_class.return_value = mock_store
         mock_config.return_value = {"max_loop_iterations": 10}
@@ -571,7 +589,10 @@ class TestStopHookLoopLogic:
     @patch("augment_agent_dashboard.hooks.stop.load_config")
     @patch("augment_agent_dashboard.hooks.stop.SessionStore")
     @patch("sys.stdin", new_callable=io.StringIO)
-    def test_loop_max_iterations_reached(self, mock_stdin, mock_store_class, mock_config, mock_notify, mock_spawn, tmp_path, monkeypatch):
+    def test_loop_max_iterations_reached(
+        self, mock_stdin, mock_store_class, mock_config, mock_notify, mock_spawn,
+        tmp_path, monkeypatch
+    ):
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
         (tmp_path / ".augment" / "dashboard").mkdir(parents=True)
 
@@ -584,6 +605,8 @@ class TestStopHookLoopLogic:
             loop_enabled=True,
             loop_count=50,  # At max
         )
+        # Set state to active so state machine can transition
+        session._state = "active"
         mock_store.get_session.return_value = session
         mock_store_class.return_value = mock_store
         mock_config.return_value = {"max_loop_iterations": 50}
@@ -607,8 +630,10 @@ class TestStopHookLoopLogic:
     @patch("augment_agent_dashboard.hooks.stop.load_config")
     @patch("augment_agent_dashboard.hooks.stop.SessionStore")
     @patch("sys.stdin", new_callable=io.StringIO)
-    def test_queued_message_processing(self, mock_stdin, mock_store_class, mock_config, mock_notify, mock_spawn, tmp_path, monkeypatch):
-        from augment_agent_dashboard.models import SessionMessage
+    def test_queued_message_processing(
+        self, mock_stdin, mock_store_class, mock_config, mock_notify, mock_spawn,
+        tmp_path, monkeypatch
+    ):
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
         (tmp_path / ".augment" / "dashboard").mkdir(parents=True)
 
@@ -622,6 +647,8 @@ class TestStopHookLoopLogic:
             loop_enabled=False,
             messages=[queued_msg],
         )
+        # Set state to active so state machine can transition to ready_for_loop
+        session._state = "active"
         mock_store.get_session.return_value = session
         mock_store_class.return_value = mock_store
         mock_config.return_value = {}
@@ -682,7 +709,10 @@ class TestStopHookGoalCompletion:
     @patch("augment_agent_dashboard.hooks.stop.load_config")
     @patch("augment_agent_dashboard.hooks.stop.SessionStore")
     @patch("sys.stdin", new_callable=io.StringIO)
-    def test_loop_stops_on_goal_completion(self, mock_stdin, mock_store_class, mock_config, mock_notify, mock_spawn, tmp_path, monkeypatch):
+    def test_loop_stops_on_goal_completion(
+        self, mock_stdin, mock_store_class, mock_config, mock_notify, mock_spawn,
+        tmp_path, monkeypatch
+    ):
         """Loop should stop when agent indicates goal is complete."""
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
         (tmp_path / ".augment" / "dashboard").mkdir(parents=True)
@@ -696,15 +726,18 @@ class TestStopHookGoalCompletion:
             loop_enabled=True,
             loop_count=5,
         )
+        # Set state to active so state machine can transition
+        session._state = "active"
         mock_store.get_session.return_value = session
         mock_store_class.return_value = mock_store
         mock_config.return_value = {"max_loop_iterations": 50}
 
         # Agent response contains completion phrase
+        agent_response = "All tasks are complete. The goal has been achieved."
         mock_stdin.write(json.dumps({
             "workspace_roots": ["/path/to/project"],
             "conversation_id": "conv-123",
-            "conversation": {"agentTextResponse": "All tasks are complete. The goal has been achieved."}
+            "conversation": {"agentTextResponse": agent_response}
         }))
         mock_stdin.seek(0)
 
@@ -722,7 +755,10 @@ class TestStopHookGoalCompletion:
     @patch("augment_agent_dashboard.hooks.stop.load_config")
     @patch("augment_agent_dashboard.hooks.stop.SessionStore")
     @patch("sys.stdin", new_callable=io.StringIO)
-    def test_loop_continues_without_completion_phrase(self, mock_stdin, mock_store_class, mock_config, mock_notify, mock_spawn, tmp_path, monkeypatch):
+    def test_loop_continues_without_completion_phrase(
+        self, mock_stdin, mock_store_class, mock_config, mock_notify, mock_spawn,
+        tmp_path, monkeypatch
+    ):
         """Loop should continue when agent does not indicate completion."""
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
         (tmp_path / ".augment" / "dashboard").mkdir(parents=True)
@@ -736,6 +772,8 @@ class TestStopHookGoalCompletion:
             loop_enabled=True,
             loop_count=5,
         )
+        # Set state to active so state machine can transition
+        session._state = "active"
         mock_store.get_session.return_value = session
         mock_store_class.return_value = mock_store
         mock_config.return_value = {"max_loop_iterations": 50}
@@ -788,7 +826,9 @@ class TestStopHookDebugLog:
     @patch("augment_agent_dashboard.hooks.stop.SessionStore")
     @patch("augment_agent_dashboard.hooks.stop.load_config")
     @patch("sys.stdin", new_callable=io.StringIO)
-    def test_debug_log_error(self, mock_stdin, mock_config, mock_store_class, tmp_path, monkeypatch):
+    def test_debug_log_error(
+        self, mock_stdin, mock_config, mock_store_class, tmp_path, monkeypatch
+    ):
         """Test debug log error handling."""
         # Make the debug log path unwritable
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
@@ -882,34 +922,6 @@ class TestStopHookStoreError:
         assert "Dashboard store error" in captured.err
 
 
-class TestMainEntryPoints:
-    """Tests for main() entry points and if __name__ == '__main__' blocks."""
-
-    @patch("augment_agent_dashboard.hooks.session_start.run_hook")
-    def test_session_start_main(self, mock_run_hook):
-        """Test session_start.main() calls run_hook."""
-        session_start.main()
-        mock_run_hook.assert_called_once()
-
-    @patch("augment_agent_dashboard.hooks.stop.run_hook")
-    def test_stop_main(self, mock_run_hook):
-        """Test stop.main() calls run_hook."""
-        stop.main()
-        mock_run_hook.assert_called_once()
-
-    @patch("augment_agent_dashboard.hooks.tool_use.run_hook")
-    def test_tool_use_main(self, mock_run_hook):
-        """Test tool_use.main() calls run_post_tool_use which calls run_hook."""
-        tool_use.main()
-        mock_run_hook.assert_called_once_with("PostToolUse")
-
-    @patch("augment_agent_dashboard.hooks.tool_use.run_hook")
-    def test_run_post_tool_use(self, mock_run_hook):
-        """Test run_post_tool_use calls run_hook with PostToolUse."""
-        tool_use.run_post_tool_use()
-        mock_run_hook.assert_called_once_with("PostToolUse")
-
-
 class TestIfNameMain:
     """Tests for if __name__ == '__main__' blocks using runpy."""
 
@@ -917,6 +929,7 @@ class TestIfNameMain:
         """Test running session_start as __main__."""
         import runpy
         import sys
+        import warnings
 
         # Mock stdin with valid JSON
         mock_stdin = io.StringIO(json.dumps({
@@ -926,13 +939,19 @@ class TestIfNameMain:
         monkeypatch.setattr(sys, "stdin", mock_stdin)
 
         with patch("augment_agent_dashboard.hooks.session_start.SessionStore"):
-            # Run the module as __main__
-            runpy.run_module("augment_agent_dashboard.hooks.session_start", run_name="__main__")
+            # Run the module as __main__, suppress runpy warning
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                runpy.run_module(
+                    "augment_agent_dashboard.hooks.session_start",
+                    run_name="__main__"
+                )
 
     def test_stop_as_main(self, monkeypatch):
         """Test running stop as __main__."""
         import runpy
         import sys
+        import warnings
 
         mock_stdin = io.StringIO(json.dumps({
             "workspace_roots": ["/test"],
@@ -943,12 +962,18 @@ class TestIfNameMain:
 
         with patch("augment_agent_dashboard.hooks.stop.SessionStore"):
             with patch("augment_agent_dashboard.hooks.stop.load_config", return_value={}):
-                runpy.run_module("augment_agent_dashboard.hooks.stop", run_name="__main__")
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", RuntimeWarning)
+                    runpy.run_module(
+                        "augment_agent_dashboard.hooks.stop",
+                        run_name="__main__"
+                    )
 
     def test_tool_use_as_main(self, monkeypatch):
         """Test running tool_use as __main__."""
         import runpy
         import sys
+        import warnings
 
         mock_stdin = io.StringIO(json.dumps({
             "workspace_roots": ["/test"],
@@ -957,5 +982,10 @@ class TestIfNameMain:
         monkeypatch.setattr(sys, "stdin", mock_stdin)
 
         with patch("augment_agent_dashboard.hooks.tool_use.SessionStore"):
-            runpy.run_module("augment_agent_dashboard.hooks.tool_use", run_name="__main__")
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                runpy.run_module(
+                    "augment_agent_dashboard.hooks.tool_use",
+                    run_name="__main__"
+                )
 

@@ -7,7 +7,8 @@ import sys
 import urllib.parse
 from pathlib import Path
 
-from ..models import AgentSession, SessionMessage, SessionStatus
+from ..models import AgentSession, SessionMessage
+from ..state_machine import SessionState, get_state_machine
 from ..store import SessionStore
 
 # Config file location
@@ -69,7 +70,14 @@ def check_goal_completion(agent_text: str, config: dict) -> bool:
     return False
 
 
-def send_notification(title: str, message: str, workspace_name: str, session_id: str, port: int = 9000, sound: bool = True) -> None:
+def send_notification(
+    title: str,
+    message: str,
+    workspace_name: str,
+    session_id: str,
+    port: int = 9000,
+    sound: bool = True,
+) -> None:
     """Send a desktop notification using terminal-notifier if available."""
     # URL to open the session in the dashboard
     session_url = f"http://localhost:{port}/session/{urllib.parse.quote(session_id, safe='')}"
@@ -101,8 +109,7 @@ def send_notification(title: str, message: str, workspace_name: str, session_id:
         cmd.extend(["-sound", "default"])
 
     try:
-        result = subprocess.run(cmd, capture_output=True, timeout=5)
-        pass  # Notification sent successfully
+        subprocess.run(cmd, capture_output=True, timeout=5)
     except Exception as e:
         sys.stderr.write(f"Notification error: {e}\n")
 
@@ -122,7 +129,7 @@ def send_browser_notification(title: str, body: str, url: str, port: int = 9000)
             data=data,
             method="POST"
         )
-        with urllib.request.urlopen(req, timeout=2) as resp:
+        with urllib.request.urlopen(req, timeout=2):
             pass  # Browser notification sent
     except Exception as e:
         sys.stderr.write(f"Browser notification error: {e}\n")
@@ -204,6 +211,7 @@ def run_hook() -> None:
 
     try:
         store = SessionStore()
+        state_machine = get_state_machine()
 
         # Extract messages from conversation
         user_prompt = conversation.get("userPrompt", "")
@@ -220,29 +228,26 @@ def run_hook() -> None:
         # Get or create session
         existing = store.get_session(session_id)
         if existing:
+            session = existing
             # Add messages to existing session
             # Check if user message already exists (may have been added by UI)
             if user_prompt:
                 user_msg_exists = any(
                     m.role == "user" and m.content.strip() == user_prompt.strip()
-                    for m in existing.messages[-5:]  # Check recent messages only
+                    for m in session.messages[-5:]  # Check recent messages only
                 )
                 if not user_msg_exists:
-                    store.add_message(
-                        session_id,
-                        SessionMessage(role="user", content=user_prompt),
+                    session.messages.append(
+                        SessionMessage(role="user", content=user_prompt)
                     )
             if agent_text:
-                store.add_message(
-                    session_id,
-                    SessionMessage(role="assistant", content=agent_text),
+                session.messages.append(
+                    SessionMessage(role="assistant", content=agent_text)
                 )
-            # Update status to idle (turn complete)
-            store.update_session_status(
-                session_id,
-                SessionStatus.IDLE,
-                current_task=user_prompt[:100] if user_prompt else None,
-            )
+            # Update files changed and task
+            session.files_changed = files_changed
+            if user_prompt:
+                session.current_task = user_prompt[:100]
         else:
             # Create new session with messages
             messages = []
@@ -256,12 +261,16 @@ def run_hook() -> None:
                 conversation_id=conversation_id,
                 workspace_root=workspace_root or "",
                 workspace_name=workspace_name,
-                status=SessionStatus.IDLE,
                 current_task=user_prompt[:100] if user_prompt else None,
                 messages=messages,
                 files_changed=files_changed,
             )
-            store.upsert_session(session)
+
+        # Use state machine to transition: fire turn_end event
+        state_machine.process_event(session, "turn_end")
+        # Then evaluate to determine next state (REVIEW_PENDING, READY_FOR_LOOP, etc.)
+        state_machine.process_event(session, "evaluate")
+        store.upsert_session(session)
 
         # Session updated successfully
 
@@ -279,9 +288,24 @@ def run_hook() -> None:
             sound=config.get("notification_sound", True),
         )
 
-        # Check if quality loop is enabled for this session
+        # Handle state-based logic
+        # Re-fetch session to get updated state
         session = store.get_session(session_id)
-        if session and session.loop_enabled:
+        if not session:
+            print(json.dumps({}))
+            return
+
+        # Check if we need to spawn a review agent (REVIEW_PENDING state)
+        if session.state == SessionState.REVIEW_PENDING:
+            # TODO: Spawn review agent here
+            # For now, skip review and go to READY_FOR_LOOP
+            session.review_satisfied = True
+            state_machine.process_event(session, "review_complete")
+            state_machine.process_event(session, "evaluate")
+            store.upsert_session(session)
+
+        # Check if we're ready to loop (READY_FOR_LOOP -> LOOP_PROMPTING)
+        if session.state == SessionState.READY_FOR_LOOP and session.loop_enabled:
             max_iterations = config.get("max_loop_iterations", 50)
 
             # Get loop config from config using the session's selected prompt name
@@ -293,7 +317,10 @@ def run_hook() -> None:
             }
 
             # Get the loop config - handle both new format (dict) and legacy format (string)
-            loop_config = loop_prompts.get(prompt_name, default_config) if prompt_name else default_config
+            if prompt_name:
+                loop_config = loop_prompts.get(prompt_name, default_config)
+            else:
+                loop_config = default_config
             if isinstance(loop_config, str):
                 # Legacy format: just a string prompt, no end condition
                 loop_prompt = loop_config
@@ -313,6 +340,7 @@ def run_hook() -> None:
             if end_condition_met or goal_complete:
                 # End condition met or goal achieved - stop the loop
                 session.loop_enabled = False
+                state_machine.process_event(session, "loop_done")
                 store.upsert_session(session)
                 send_notification(
                     "Loop Complete",
@@ -323,7 +351,8 @@ def run_hook() -> None:
                     sound=config.get("notification_sound", True),
                 )
             elif session.loop_count < max_iterations:
-                # Increment loop count
+                # Transition to LOOP_PROMPTING
+                state_machine.process_event(session, "evaluate")
                 session.loop_count += 1
                 store.upsert_session(session)
 
@@ -332,6 +361,7 @@ def run_hook() -> None:
             else:
                 # Max iterations reached, disable loop
                 session.loop_enabled = False
+                state_machine.process_event(session, "loop_done")
                 store.upsert_session(session)
                 send_notification(
                     "Loop Complete",
@@ -341,18 +371,19 @@ def run_hook() -> None:
                     port=config.get("port", 9000),
                     sound=config.get("notification_sound", True),
                 )
-        elif session:
-            # Check for queued messages (only if loop is not active)
+        elif session.state == SessionState.READY_FOR_LOOP:
+            # Loop not enabled, transition to IDLE
+            state_machine.process_event(session, "evaluate")
+            store.upsert_session(session)
+
+            # Check for queued messages
             queued_messages = [m for m in session.messages if m.role == "queued"]
             if queued_messages:
                 # Get the first queued message
                 next_msg = queued_messages[0]
-                # Processing queued message
-
                 # Convert queued message to user message
                 next_msg.role = "user"
                 store.upsert_session(session)
-
                 # Spawn auggie with the queued message
                 spawn_loop_message(conversation_id, workspace_root, next_msg.content)
 

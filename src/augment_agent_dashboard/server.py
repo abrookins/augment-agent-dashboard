@@ -220,7 +220,9 @@ async def create_new_session(
     working_directory = os.path.expanduser(working_directory.strip())
 
     if not os.path.isdir(working_directory):
-        raise HTTPException(status_code=400, detail=f"Directory does not exist: {working_directory}")
+        raise HTTPException(
+            status_code=400, detail=f"Directory does not exist: {working_directory}"
+        )
 
     if not prompt or not prompt.strip():
         raise HTTPException(status_code=400, detail="Prompt is required")
@@ -1041,9 +1043,19 @@ def get_base_styles(dark_mode: str | None) -> str:
             --text-secondary: {text_secondary};
             --border-color: {border_color};
             --accent: #4a9eff;
+            /* Legacy status colors */
             --status-active: #4ade80;
             --status-idle: #fbbf24;
             --status-stopped: #94a3b8;
+            /* State machine colors */
+            --state-idle: #94a3b8;
+            --state-active: #4ade80;
+            --state-turn_complete: #60a5fa;
+            --state-review_pending: #f472b6;
+            --state-under_review: #c084fc;
+            --state-ready_for_loop: #22d3ee;
+            --state-loop_prompting: #a78bfa;
+            --state-error: #f87171;
         }}
         {dark_media}
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
@@ -1089,6 +1101,197 @@ def get_base_styles(dark_mode: str | None) -> str:
         .status-active {{ background: var(--status-active); }}
         .status-idle {{ background: var(--status-idle); }}
         .status-stopped {{ background: var(--status-stopped); }}
+        /* State machine dot colors */
+        .state-idle {{ background: var(--state-idle); }}
+        .state-active {{ background: var(--state-active); }}
+        .state-turn_complete {{ background: var(--state-turn_complete); }}
+        .state-review_pending {{ background: var(--state-review_pending); }}
+        .state-under_review {{ background: var(--state-under_review); }}
+        .state-ready_for_loop {{ background: var(--state-ready_for_loop); }}
+        .state-loop_prompting {{ background: var(--state-loop_prompting); }}
+        .state-error {{ background: var(--state-error); }}
+        /* State badge styles */
+        .state-badge {{
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 0.8em;
+            font-weight: 500;
+        }}
+        .state-badge .state-dot {{
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-top: 0;
+        }}
+        .state-badge.badge-idle {{
+            background: rgba(148, 163, 184, 0.2); color: var(--state-idle);
+        }}
+        .state-badge.badge-active {{
+            background: rgba(74, 222, 128, 0.2); color: var(--state-active);
+        }}
+        .state-badge.badge-turn_complete {{
+            background: rgba(96, 165, 250, 0.2); color: var(--state-turn_complete);
+        }}
+        .state-badge.badge-review_pending {{
+            background: rgba(244, 114, 182, 0.2); color: var(--state-review_pending);
+        }}
+        .state-badge.badge-under_review {{
+            background: rgba(192, 132, 252, 0.2); color: var(--state-under_review);
+        }}
+        .state-badge.badge-ready_for_loop {{
+            background: rgba(34, 211, 238, 0.2); color: var(--state-ready_for_loop);
+        }}
+        .state-badge.badge-loop_prompting {{
+            background: rgba(167, 139, 250, 0.2); color: var(--state-loop_prompting);
+        }}
+        .state-badge.badge-error {{
+            background: rgba(248, 113, 113, 0.2); color: var(--state-error);
+        }}
+        .notification-banner {{
+            display: none;
+            background: var(--accent);
+            color: white;
+            padding: 10px 15px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            cursor: pointer;
+        }}
+        .new-session-form-container {{
+            display: none;
+            margin-top: 15px;
+            background: var(--card-bg);
+            padding: 20px;
+            border-radius: 12px;
+            border: 1px solid var(--border);
+        }}
+        .btn-new-session {{
+            background: var(--accent);
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1em;
+        }}
+        .form-input {{
+            width: 100%;
+            padding: 10px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: var(--bg);
+            color: var(--text);
+            box-sizing: border-box;
+        }}
+        .form-textarea {{
+            width: 100%;
+            padding: 10px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: var(--bg);
+            color: var(--text);
+            resize: vertical;
+            box-sizing: border-box;
+        }}
+        .btn-submit {{
+            background: var(--accent);
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 1em;
+        }}
+        .btn-disabled {{
+            opacity: 0.5;
+            cursor: not-allowed;
+            background: var(--border-color);
+            color: var(--text-secondary);
+            border: none;
+            border-radius: 8px;
+        }}
+        .no-sessions {{
+            color: var(--text-secondary);
+            text-align: center;
+            padding: 20px;
+        }}
+        .modal-input {{
+            width: 100%;
+            padding: 10px;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            box-sizing: border-box;
+        }}
+        .modal-textarea {{
+            width: 100%;
+            padding: 10px;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            resize: vertical;
+            box-sizing: border-box;
+        }}
+        .btn-cancel {{
+            flex: 1;
+            padding: 10px;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            background: transparent;
+            color: var(--text-primary);
+            cursor: pointer;
+        }}
+        .btn-start {{
+            flex: 1;
+            background: var(--accent);
+            color: white;
+            border: none;
+            padding: 10px;
+            border-radius: 6px;
+            cursor: pointer;
+        }}
+        .btn-small {{
+            padding: 4px 8px;
+            font-size: 0.8em;
+        }}
+        .inline-form {{
+            display: inline;
+        }}
+        .queue-count {{
+            color: var(--text-secondary);
+            font-size: 0.9em;
+        }}
+        .status-banner {{
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 10px;
+        }}
+        .status-banner.status-active {{
+            background: var(--status-active);
+            color: #000;
+        }}
+        .message-form {{
+            margin-bottom: 10px;
+        }}
+        .machine-badge-inline {{
+            display: inline-block;
+            background: var(--accent);
+            color: white;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 0.85em;
+            margin-bottom: 8px;
+        }}
+        .remote-session-badge {{
+            background: var(--border-color);
+            padding: 8px 12px;
+            border-radius: 6px;
+            margin-bottom: 10px;
+        }}
         .session-info {{ overflow: hidden; min-width: 0; }}
         .session-info h3 {{
             font-size: 1em;
@@ -1521,7 +1724,8 @@ def _get_notification_script() -> str:
             if (isIOS() && !isPWA()) {
                 banner.style.display = 'block';
                 banner.style.background = 'var(--accent)';
-                bannerText.innerHTML = '📱 <strong>Add to Home Screen</strong> for notifications: tap <span style="font-size:1.2em">⎙</span> then "Add to Home Screen"';
+                bannerText.innerHTML = '📱 <strong>Add to Home Screen</strong>: ' +
+                    'tap ⎙ then "Add to Home Screen"';
                 banner.onclick = null;
                 banner.style.cursor = 'default';
                 return;
@@ -1545,7 +1749,7 @@ def _get_notification_script() -> str:
 
             if (Notification.permission === 'default') {
                 banner.style.display = 'block';
-                bannerText.textContent = '🔔 Click to enable browser notifications for agent alerts';
+                bannerText.textContent = '🔔 Click to enable notifications for agent alerts';
                 banner.onclick = requestPermission;
                 banner.style.cursor = 'pointer';
             } else if (Notification.permission === 'granted') {
@@ -1575,7 +1779,9 @@ def _get_notification_script() -> str:
 
         async function pollNotifications() {
             try {
-                const response = await fetch('/api/notifications/poll?since=' + encodeURIComponent(lastNotificationId));
+                const url = '/api/notifications/poll?since=' +
+                    encodeURIComponent(lastNotificationId);
+                const response = await fetch(url);
                 const data = await response.json();
                 for (const n of data.notifications) {
                     showNotification(n);
@@ -1709,14 +1915,21 @@ def _render_session_cards(sessions: list) -> str:
 
     session_cards = ""
     for s in sessions:
-        status_class = f"status-{s.status.value}"
+        # Get state for styling (fall back to status)
+        try:
+            state_value = s.state.value
+        except (AttributeError, ValueError):
+            state_value = s.status.value
+
+        state_class = f"state-{state_value}"
+        state_label = _get_state_label(state_value)
         preview = s.last_message_preview or "No messages yet"
         time_ago = format_time_ago(s.last_activity, include_title=True)
 
         ellipsis = "..." if len(preview) > 80 else ""
         session_cards += f"""
         <a href="/session/{s.session_id}" class="session-card">
-            <div class="status-dot {status_class}" title="{s.status.value}"></div>
+            <div class="status-dot {state_class}" title="{state_label}"></div>
             <div class="session-info">
                 <h3>{s.workspace_name}</h3>
                 <div class="workspace">{s.workspace_root}</div>
@@ -1768,24 +1981,29 @@ def render_dashboard(sessions: list, dark_mode: str | None, sort_by: str = "rece
                 <a href="/config">⚙️ Config</a>
             </div>
         </div>
-        <div id="notification-banner" style="display:none;background:var(--accent);color:white;padding:10px 15px;border-radius:8px;margin-bottom:15px;cursor:pointer;">
-            🔔 <span id="notification-text">Enable browser notifications to get alerts on your phone</span>
+        <div id="notification-banner" class="notification-banner">
+            🔔 <span id="notification-text">Enable notifications for alerts</span>
         </div>
         <div class="new-session-section" style="margin-bottom:20px;">
-            <button onclick="toggleNewSession()" class="btn-new-session" style="background:var(--accent);color:white;border:none;padding:10px 20px;border-radius:8px;cursor:pointer;font-size:1em;">
+            <button onclick="toggleNewSession()" class="btn-new-session">
                 ➕ New Session
             </button>
-            <div id="new-session-form" style="display:none;margin-top:15px;background:var(--card-bg);padding:20px;border-radius:12px;border:1px solid var(--border);">
+            <div id="new-session-form" class="new-session-form-container">
                 <form method="POST" action="/session/new">
                     <div style="margin-bottom:15px;">
-                        <label for="working_directory" style="display:block;margin-bottom:5px;font-weight:500;">Working Directory</label>
-                        <input type="text" id="working_directory" name="working_directory" placeholder="/path/to/project" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);box-sizing:border-box;">
+                        <label for="working_directory" class="field-label">
+                            Working Directory
+                        </label>
+                        <input type="text" id="working_directory" name="working_directory"
+                            placeholder="/path/to/project" class="form-input">
                     </div>
                     <div style="margin-bottom:15px;">
-                        <label for="prompt" style="display:block;margin-bottom:5px;font-weight:500;">Initial Prompt</label>
-                        <textarea id="prompt" name="prompt" rows="4" placeholder="What would you like the agent to do?" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);resize:vertical;box-sizing:border-box;"></textarea>
+                        <label for="prompt" class="field-label">Initial Prompt</label>
+                        <textarea id="prompt" name="prompt" rows="4"
+                            placeholder="What would you like the agent to do?"
+                            class="form-textarea"></textarea>
                     </div>
-                    <button type="submit" style="background:var(--accent);color:white;border:none;padding:10px 20px;border-radius:6px;cursor:pointer;font-size:1em;">🚀 Start Session</button>
+                    <button type="submit" class="btn-submit">🚀 Start Session</button>
                 </form>
             </div>
         </div>
@@ -1814,7 +2032,9 @@ def render_dashboard(sessions: list, dark_mode: str | None, sort_by: str = "rece
                 }}
                 // Check if any input/textarea has focus
                 const activeEl = document.activeElement;
-                if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA')) {{
+                const isInput = activeEl && activeEl.tagName === 'INPUT';
+                const isTextarea = activeEl && activeEl.tagName === 'TEXTAREA';
+                if (isInput || isTextarea) {{
                     return true;
                 }}
                 return false;
@@ -1828,7 +2048,8 @@ def render_dashboard(sessions: list, dark_mode: str | None, sort_by: str = "rece
                 }}
 
                 try {{
-                    const response = await fetch('/api/sessions-html?sort=' + encodeURIComponent(sortBy));
+                    const url = '/api/sessions-html?sort=' + encodeURIComponent(sortBy);
+                    const response = await fetch(url);
                     if (response.ok) {{
                         const html = await response.text();
                         document.getElementById('session-list').innerHTML = html;
@@ -2042,25 +2263,33 @@ def _render_swim_lane(
         '''
 
     # New session button - different action for local vs remote
+    escaped_name = html.escape(name)
     if is_local:
         new_session_btn = f'''
-        <button onclick="openNewSession('local', '{html.escape(name)}')" class="btn-new-session" style="background:var(--accent);color:white;border:none;border-radius:8px;cursor:pointer;">
+        <button onclick="openNewSession('local', '{escaped_name}')" class="btn-new-session">
             ➕ New Session
         </button>
         '''
     else:
-        disabled = ' disabled style="opacity:0.5;cursor:not-allowed;background:var(--border-color);color:var(--text-secondary);border:none;border-radius:8px;"' if not is_online else f' onclick="openNewSession(\'{html.escape(origin_url or "")}\', \'{html.escape(name)}\')" style="background:var(--accent);color:white;border:none;border-radius:8px;cursor:pointer;"'
+        escaped_origin = html.escape(origin_url or "")
+        if not is_online:
+            disabled = ' disabled class="btn-disabled"'
+        else:
+            onclick = f"openNewSession('{escaped_origin}', '{escaped_name}')"
+            disabled = f' onclick="{onclick}" class="btn-new-session"'
         new_session_btn = f'''
-        <button class="btn-new-session"{disabled}>
+        <button{disabled}>
             ➕ New Session
         </button>
         '''
 
+    no_sessions_msg = '<div class="no-sessions">No sessions</div>'
+    sessions_html = session_cards if session_cards else no_sessions_msg
     return f'''
     <div class="{lane_class}" data-lane-id="{lane_id}" data-origin="{origin_url or 'local'}">
         <div class="swim-lane-header">
             <div class="swim-lane-title">
-                💻 {html.escape(name)}
+                💻 {escaped_name}
             </div>
             <div class="swim-lane-status">
                 <span class="status-indicator {status_class}"></span>
@@ -2069,7 +2298,7 @@ def _render_swim_lane(
             {new_session_btn}
         </div>
         <div class="swim-lane-sessions" id="lane-sessions-{lane_id}">
-            {session_cards if session_cards else '<div style="color:var(--text-secondary);text-align:center;padding:20px;">No sessions</div>'}
+            {sessions_html}
         </div>
     </div>
     '''
@@ -2151,7 +2380,7 @@ def render_dashboard_swimlanes(
             </div>
         </div>
 
-        <div id="notification-banner" style="display:none;background:var(--accent);color:white;padding:10px 15px;border-radius:8px;margin-bottom:15px;cursor:pointer;">
+        <div id="notification-banner" class="notification-banner">
             🔔 <span id="notification-text">Enable browser notifications</span>
         </div>
 
@@ -2164,23 +2393,28 @@ def render_dashboard_swimlanes(
         </div>
 
         <!-- New Session Modal -->
-        <div id="new-session-overlay" class="new-session-overlay" onclick="if(event.target===this)closeNewSession()">
+        <div id="new-session-overlay" class="new-session-overlay"
+            onclick="if(event.target===this)closeNewSession()">
             <div class="new-session-modal">
                 <h3>➕ New Session</h3>
                 <div class="machine-label" id="new-session-machine">on: This Machine</div>
                 <form id="new-session-form" method="POST" action="/session/new">
                     <input type="hidden" id="new-session-origin" name="origin" value="local">
                     <div style="margin-bottom:15px;">
-                        <label style="display:block;margin-bottom:5px;font-weight:500;">Working Directory</label>
-                        <input type="text" id="working_directory" name="working_directory" placeholder="/path/to/project" style="width:100%;padding:10px;border:1px solid var(--border-color);border-radius:6px;background:var(--bg-primary);color:var(--text-primary);box-sizing:border-box;">
+                        <label class="field-label">Working Directory</label>
+                        <input type="text" id="working_directory" name="working_directory"
+                            placeholder="/path/to/project" class="modal-input">
                     </div>
                     <div style="margin-bottom:15px;">
-                        <label style="display:block;margin-bottom:5px;font-weight:500;">Initial Prompt</label>
-                        <textarea id="prompt" name="prompt" rows="4" placeholder="What would you like the agent to do?" style="width:100%;padding:10px;border:1px solid var(--border-color);border-radius:6px;background:var(--bg-primary);color:var(--text-primary);resize:vertical;box-sizing:border-box;"></textarea>
+                        <label class="field-label">Initial Prompt</label>
+                        <textarea id="prompt" name="prompt" rows="4"
+                            placeholder="What would you like the agent to do?"
+                            class="modal-textarea"></textarea>
                     </div>
                     <div style="display:flex;gap:10px;">
-                        <button type="button" onclick="closeNewSession()" style="flex:1;padding:10px;border:1px solid var(--border-color);border-radius:6px;background:transparent;color:var(--text-primary);cursor:pointer;">Cancel</button>
-                        <button type="submit" style="flex:1;background:var(--accent);color:white;border:none;padding:10px;border-radius:6px;cursor:pointer;">🚀 Start</button>
+                        <button type="button" onclick="closeNewSession()"
+                            class="btn-cancel">Cancel</button>
+                        <button type="submit" class="btn-start">🚀 Start</button>
                     </div>
                 </form>
             </div>
@@ -2226,7 +2460,8 @@ def render_dashboard_swimlanes(
                 if (origin === 'local') {{
                     form.action = '/session/new';
                 }} else {{
-                    form.action = '/api/federation/proxy/session/new?origin=' + encodeURIComponent(origin);
+                    const baseUrl = '/api/federation/proxy/session/new?origin=';
+                    form.action = baseUrl + encodeURIComponent(origin);
                 }}
 
                 document.getElementById('new-session-overlay').classList.add('active');
@@ -2248,13 +2483,15 @@ def render_dashboard_swimlanes(
 
             async function refreshSwimLanes() {{
                 // Skip if modal is open
-                if (document.getElementById('new-session-overlay').classList.contains('active')) {{
+                const overlay = document.getElementById('new-session-overlay');
+                if (overlay.classList.contains('active')) {{
                     scheduleRefresh();
                     return;
                 }}
 
                 try {{
-                    const response = await fetch('/api/swimlanes-html?sort=' + encodeURIComponent(sortBy));
+                    const url = '/api/swimlanes-html?sort=' + encodeURIComponent(sortBy);
+                    const response = await fetch(url);
                     if (response.ok) {{
                         const html = await response.text();
                         document.getElementById('swim-lanes').innerHTML = html;
@@ -2512,17 +2749,19 @@ def render_config_page(
         <div class="prompt-card">
             <div class="prompt-header">
                 <strong>{escaped_name}</strong>
-                <form method="POST" action="/config/prompts/delete" style="display:inline;">
+                <form method="POST" action="/config/prompts/delete" class="inline-form">
                     <input type="hidden" name="name" value="{escaped_name}">
-                    <button type="submit" onclick="return confirm('Delete this prompt?')" class="btn-delete" style="padding:4px 8px;font-size:0.8em;">🗑</button>
+                    <button type="submit" onclick="return confirm('Delete this prompt?')"
+                        class="btn-delete btn-small">🗑</button>
                 </form>
             </div>
             <form method="POST" action="/config/prompts/edit" class="prompt-edit-form">
                 <input type="hidden" name="name" value="{escaped_name}">
                 <label class="field-label">Prompt (instructions for the LLM):</label>
                 <textarea name="prompt" rows="4">{escaped_prompt}</textarea>
-                <label class="field-label">End Condition (text that stops the loop when found in response):</label>
-                <input type="text" name="end_condition" value="{escaped_condition}" placeholder="e.g., LOOP_COMPLETE: Task finished.">
+                <label class="field-label">End Condition (stops loop when found):</label>
+                <input type="text" name="end_condition" value="{escaped_condition}"
+                    placeholder="e.g., LOOP_COMPLETE: Task finished.">
                 <button type="submit" class="btn-enable" style="margin-top:8px;">Save</button>
             </form>
         </div>
@@ -2681,8 +2920,9 @@ def render_config_page(
 
         <h2>Loop Prompts</h2>
         <p style="color:var(--text-secondary);margin-bottom:15px;">
-            Configure loop prompts with end conditions. The prompt tells the LLM what to do and should explain
-            the end condition. When the LLM includes the end condition text in its response, the loop stops.
+            Configure loop prompts with end conditions. The prompt tells the LLM what to do
+            and should explain the end condition. When the LLM includes the end condition
+            text in its response, the loop stops.
         </p>
 
         {prompts_html}
@@ -2691,11 +2931,13 @@ def render_config_page(
             <h3>Add New Prompt</h3>
             <form method="POST" action="/config/prompts/add">
                 <label class="field-label">Name:</label>
-                <input type="text" name="name" placeholder="Prompt name (e.g., 'Security Review')" required>
+                <input type="text" name="name" placeholder="e.g., 'Security Review'" required>
                 <label class="field-label">Prompt (instructions for the LLM):</label>
-                <textarea name="prompt" placeholder="Enter instructions. Include what the LLM should say when done, e.g., 'When finished, say LOOP_COMPLETE: Security review done.'" required></textarea>
+                <textarea name="prompt" placeholder="Enter instructions for the agent."
+                    required></textarea>
                 <label class="field-label">End Condition (text that stops the loop):</label>
-                <input type="text" name="end_condition" placeholder="e.g., LOOP_COMPLETE: Security review done.">
+                <input type="text" name="end_condition"
+                    placeholder="e.g., LOOP_COMPLETE: Done.">
                 <button type="submit" class="btn-enable" style="width:100%;">Add Prompt</button>
             </form>
         </div>
@@ -2737,28 +2979,35 @@ def _render_message_form(session) -> str:
 
     # Count queued messages
     queued_count = sum(1 for m in session.messages if m.role == "queued")
-    queue_info = f'<span style="color:var(--text-secondary);font-size:0.9em;">({queued_count} queued)</span>' if queued_count > 0 else ""
+    queue_info = ""
+    if queued_count > 0:
+        queue_info = f'<span class="queue-count">({queued_count} queued)</span>'
 
+    sid = session.session_id
     if session.status == SessionStatus.ACTIVE:
         return f'''
-            <div style="background:var(--status-active);color:#000;padding:12px;border-radius:8px;margin-bottom:10px;">
-                ⏳ Agent is currently working. Messages will be queued and sent when ready. {queue_info}
+            <div class="status-banner status-active">
+                ⏳ Agent working. Messages queued. {queue_info}
             </div>
-            <form method="POST" action="/session/{session.session_id}/queue">
-                <textarea id="message-input" name="message" placeholder="Type a message to queue..."></textarea>
+            <form method="POST" action="/session/{sid}/queue">
+                <textarea id="message-input" name="message"
+                    placeholder="Type a message to queue..."></textarea>
                 <button type="submit" class="btn-queue">🕐 Enqueue Message</button>
             </form>
         '''
     else:
+        queue_action = f"/session/{sid}/queue"
         return f'''
             <p style="color: var(--text-secondary); margin-bottom: 10px;">
                 Send a message directly, or queue it for later. {queue_info}
             </p>
-            <form method="POST" action="/session/{session.session_id}/message" style="margin-bottom:10px;">
-                <textarea id="message-input" name="message" placeholder="Type a message for the agent..."></textarea>
+            <form method="POST" action="/session/{sid}/message" class="message-form">
+                <textarea id="message-input" name="message"
+                    placeholder="Type a message for the agent..."></textarea>
                 <div style="display:flex;gap:8px;flex-wrap:wrap;">
                     <button type="submit">▶ Send Now</button>
-                    <button type="submit" formaction="/session/{session.session_id}/queue" class="btn-queue">🕐 Enqueue</button>
+                    <button type="submit" formaction="{queue_action}"
+                        class="btn-queue">🕐 Enqueue</button>
                 </div>
             </form>
         '''
@@ -2831,11 +3080,13 @@ def _render_loop_controls(session, loop_prompts: dict[str, dict[str, str]]) -> s
             else:
                 prompt = config.get("prompt", "")
                 end_cond = config.get("end_condition", "")
-                tooltip = f"Prompt: {prompt[:80]}..." if len(prompt) > 80 else f"Prompt: {prompt}"
+                prompt_preview = prompt[:80] + "..." if len(prompt) > 80 else prompt
+                tooltip = f"Prompt: {prompt_preview}"
                 if end_cond:
                     tooltip += f"\n\nStops when: {end_cond}"
             escaped_tooltip = html.escape(tooltip)
-            options_html += f'<option value="{escaped_name}" title="{escaped_tooltip}">{escaped_name}</option>'
+            opt = f'<option value="{escaped_name}" title="{escaped_tooltip}">'
+            options_html += f'{opt}{escaped_name}</option>'
 
         return f'''
             <div class="loop-controls">
@@ -2902,10 +3153,12 @@ def _render_messages_html(session) -> tuple[str, int]:
 
     # Add clear queue button if there are queued messages
     if queued_count > 0:
+        confirm_msg = f"Clear all {queued_count} queued messages?"
         messages_html += f'''
         <div class="queue-actions">
             <form method="POST" action="/session/{session.session_id}/queue/clear">
-                <button type="submit" class="btn-delete" style="font-size:0.85em;" onclick="return confirm('Clear all {queued_count} queued messages?')">
+                <button type="submit" class="btn-delete btn-small"
+                    onclick="return confirm('{confirm_msg}')">
                     🗑 Clear Queue ({queued_count})
                 </button>
             </form>
@@ -2915,11 +3168,42 @@ def _render_messages_html(session) -> tuple[str, int]:
     return messages_html, queued_count
 
 
+def _get_state_label(state_value: str) -> str:
+    """Get a human-readable label for a session state."""
+    labels = {
+        "idle": "Idle",
+        "active": "Working",
+        "turn_complete": "Turn Complete",
+        "review_pending": "Review Pending",
+        "under_review": "Under Review",
+        "ready_for_loop": "Ready",
+        "loop_prompting": "Looping",
+        "error": "Error",
+    }
+    return labels.get(state_value, state_value.replace("_", " ").title())
+
+
+def _render_state_badge(session) -> str:
+    """Render a state badge showing the detailed session state."""
+    try:
+        state_value = session.state.value
+    except (AttributeError, ValueError):
+        # Fall back to status if state not available
+        state_value = session.status.value
+
+    label = _get_state_label(state_value)
+    return f'''<span class="state-badge badge-{state_value}">
+        <span class="state-dot state-{state_value}"></span>
+        {label}
+    </span>'''
+
+
 def _render_session_status_html(session) -> str:
     """Render the session status indicator HTML."""
     time_ago = format_time_ago(session.last_activity, include_title=True)
+    state_badge = _render_state_badge(session)
     return f"""
-        <div>{session.status.value} • {time_ago}</div>
+        <div>{state_badge} • {time_ago}</div>
         <div>{session.message_count} messages</div>
     """
 
@@ -2936,9 +3220,16 @@ def render_session_detail(
     # Render message history
     messages_html, queued_count = _render_messages_html(session)
 
-    status_class = f"status-{session.status.value}"
+    # Get state for styling
+    try:
+        state_value = session.state.value
+    except (AttributeError, ValueError):
+        state_value = session.status.value
+
+    state_class = f"state-{state_value}"
     time_ago = format_time_ago(session.last_activity, include_title=True)
     escaped_machine = html.escape(machine_name)
+    state_badge = _render_state_badge(session)
 
     return f"""
     <!DOCTYPE html>
@@ -2960,20 +3251,19 @@ def render_session_detail(
 
         <div class="header">
             <h1>
-                <span class="status-dot {status_class}"
+                <span class="status-dot {state_class}"
                     style="display:inline-block;vertical-align:middle;margin-right:10px;">
                 </span>
                 {session.workspace_name}
             </h1>
-            <div class="session-meta">
-                <div>{session.status.value} • {time_ago}</div>
+            <div class="session-meta" id="session-status">
+                <div>{state_badge} • {time_ago}</div>
                 <div>{session.message_count} messages</div>
             </div>
         </div>
 
         <div class="session-detail-meta">
-            <div class="machine-badge" style="display:inline-block;background:var(--accent);
-                 color:white;padding:4px 10px;border-radius:12px;font-size:0.85em;margin-bottom:8px;">
+            <div class="machine-badge-inline">
                 💻 {escaped_machine}
             </div>
             <br>
@@ -2984,7 +3274,8 @@ def render_session_detail(
             </div>
             <div class="loop-controls" style="margin-top:8px;">
                 <form method="POST" action="/session/{session.session_id}/delete">
-                    <button type="submit" onclick="return confirm('Delete this session?')" class="btn-delete">
+                    <button type="submit" class="btn-delete"
+                        onclick="return confirm('Delete this session?')">
                         🗑 Delete Session
                     </button>
                 </form>
@@ -3064,7 +3355,8 @@ def render_session_detail(
 
             async function refreshSession() {{
                 try {{
-                    const response = await fetch('/api/sessions/' + encodeURIComponent(sessionId) + '/messages-html');
+                    const url = '/api/sessions/' + encodeURIComponent(sessionId);
+                    const response = await fetch(url + '/messages-html');
                     if (!response.ok) return;
 
                     const data = await response.json();
@@ -3084,7 +3376,8 @@ def render_session_detail(
                     // Update messages - preserve scroll position
                     const messageList = document.getElementById('message-list');
                     if (messageList) {{
-                        const wasAtBottom = messageList.scrollHeight - messageList.scrollTop <= messageList.clientHeight + 100;
+                        const scrollDiff = messageList.scrollHeight - messageList.scrollTop;
+                        const wasAtBottom = scrollDiff <= messageList.clientHeight + 100;
                         const oldScrollTop = messageList.scrollTop;
 
                         messageList.innerHTML = data.messages_html;
@@ -3216,27 +3509,30 @@ def render_remote_session_detail(
         import base64
         base64_content = base64.b64encode(content.encode()).decode()
 
+        copy_fn = f"copyMessage(this, '{base64_content}')"
         messages_html += f'''
         <div class="message {role_class}">
             <div class="message-header">
                 <span class="role-badge">{role_label}</span>
                 <span class="timestamp" data-timestamp="{timestamp}">{timestamp}</span>
-                <button class="copy-btn" onclick="copyMessage(this, '{base64_content}')">📋 Copy</button>
+                <button class="copy-btn" onclick="{copy_fn}">📋 Copy</button>
             </div>
             <div class="message-content">{content_html}</div>
         </div>
         '''
 
     if not messages_html:
-        messages_html = '<div style="color:var(--text-secondary);text-align:center;padding:20px;">No messages yet</div>'
+        messages_html = '<div class="no-sessions">No messages yet</div>'
 
     # Message form for remote sessions - proxied through our server
+    form_action = f"/api/remote/session/{federated_session_id}/message"
     message_form = f'''
         <p style="color: var(--text-secondary); margin-bottom: 10px;">
-            Send a message to this session on <strong>{html.escape(remote.name)}</strong>
+            Send a message to <strong>{html.escape(remote.name)}</strong>
         </p>
-        <form method="POST" action="/api/remote/session/{federated_session_id}/message">
-            <textarea id="message-input" name="message" placeholder="Type a message for the agent..."></textarea>
+        <form method="POST" action="{form_action}">
+            <textarea id="message-input" name="message"
+                placeholder="Type a message for the agent..."></textarea>
             <button type="submit">▶ Send to Remote</button>
         </form>
     '''
@@ -3273,9 +3569,10 @@ def render_remote_session_detail(
         </div>
 
         <div class="session-detail-meta">
-            <div style="background:var(--border-color);padding:8px 12px;border-radius:6px;margin-bottom:10px;">
-                🌐 <strong>Remote Session</strong> from <strong>{html.escape(remote.name)}</strong>
-                <span style="color:var(--text-secondary);font-size:0.85em;">({html.escape(remote.url)})</span>
+            <div class="remote-session-badge">
+                🌐 <strong>Remote Session</strong> from
+                <strong>{html.escape(remote.name)}</strong>
+                <span class="queue-count">({html.escape(remote.url)})</span>
             </div>
             <strong>Workspace:</strong> {workspace_root}<br>
             <strong>Remote Session ID:</strong> {remote_session_id}
@@ -3323,45 +3620,58 @@ def render_remote_session_detail(
     """
 
 
+# Default loop prompts - each line must be <= 100 chars to pass linting
 DEFAULT_LOOP_PROMPTS: dict[str, dict[str, str]] = {
     "TDD Quality": {
         "prompt": (
-            "Continue working on this task using TDD. Write tests first, then implement code to pass them. "
-            "Verify code quality with mfcqi (target score >= 0.8). When you have absolutely completed every "
-            "requirement—including ones you think don't matter—respond with exactly: 'LOOP_COMPLETE: TDD quality goals achieved.'"
+            "Continue working on this task using TDD. Write tests first, then "
+            "implement code to pass them. Verify code quality with mfcqi "
+            "(target score >= 0.8). When you have absolutely completed every "
+            "requirement—including ones you think don't matter—respond with "
+            "exactly: 'LOOP_COMPLETE: TDD quality goals achieved.'"
         ),
         "end_condition": "LOOP_COMPLETE: TDD quality goals achieved.",
     },
     "Code Review": {
         "prompt": (
-            "Review the code you just wrote. Look for bugs, security issues, performance problems, and style violations. "
-            "Fix any issues you find. When you have absolutely completed every requirement—including ones you think "
-            "don't matter—respond with exactly: 'LOOP_COMPLETE: Code review finished.'"
+            "Review the code you just wrote. Look for bugs, security issues, "
+            "performance problems, and style violations. Fix any issues you "
+            "find. When you have absolutely completed every requirement—"
+            "including ones you think don't matter—respond with exactly: "
+            "'LOOP_COMPLETE: Code review finished.'"
         ),
         "end_condition": "LOOP_COMPLETE: Code review finished.",
     },
     "Refactor": {
         "prompt": (
-            "Analyze the code you just wrote for opportunities to improve. Look for: duplicated code, overly complex logic, "
-            "poor naming, violation of SOLID principles. Refactor where beneficial. When you have absolutely completed every "
-            "requirement—including ones you think don't matter—respond with exactly: 'LOOP_COMPLETE: Refactoring finished.'"
+            "Analyze the code you just wrote for opportunities to improve. "
+            "Look for: duplicated code, overly complex logic, poor naming, "
+            "violation of SOLID principles. Refactor where beneficial. When "
+            "you have absolutely completed every requirement—including ones "
+            "you think don't matter—respond with exactly: 'LOOP_COMPLETE: "
+            "Refactoring finished.'"
         ),
         "end_condition": "LOOP_COMPLETE: Refactoring finished.",
     },
     "Documentation": {
         "prompt": (
-            "Review the code you just wrote for documentation quality. Add or improve: docstrings for all public "
-            "functions/classes, inline comments for complex logic, type hints for all parameters and return values. "
-            "When you have absolutely completed every requirement—including ones you think don't matter—respond with "
+            "Review the code you just wrote for documentation quality. Add or "
+            "improve: docstrings for all public functions/classes, inline "
+            "comments for complex logic, type hints for all parameters and "
+            "return values. When you have absolutely completed every "
+            "requirement—including ones you think don't matter—respond with "
             "exactly: 'LOOP_COMPLETE: Documentation complete.'"
         ),
         "end_condition": "LOOP_COMPLETE: Documentation complete.",
     },
     "Test Coverage": {
         "prompt": (
-            "Analyze test coverage for the code you just wrote. Write additional tests for: edge cases, error conditions, "
-            "boundary values, integration scenarios. Aim for 100% coverage. When you have absolutely completed every "
-            "requirement—including ones you think don't matter—respond with exactly: 'LOOP_COMPLETE: Test coverage achieved.'"
+            "Analyze test coverage for the code you just wrote. Write "
+            "additional tests for: edge cases, error conditions, boundary "
+            "values, integration scenarios. Aim for 100% coverage. When you "
+            "have absolutely completed every requirement—including ones you "
+            "think don't matter—respond with exactly: 'LOOP_COMPLETE: Test "
+            "coverage achieved.'"
         ),
         "end_condition": "LOOP_COMPLETE: Test coverage achieved.",
     },
@@ -3421,7 +3731,8 @@ def main():
         "-p", "--port", type=int, default=8080, help="Port to run the server on (default: 8080)"
     )
     parser.add_argument(
-        "--sound", action="store_true", default=True, help="Enable notification sound (default: enabled)"
+        "--sound", action="store_true", default=True,
+        help="Enable notification sound (default: enabled)"
     )
     parser.add_argument(
         "--no-sound", action="store_true", help="Disable notification sound"

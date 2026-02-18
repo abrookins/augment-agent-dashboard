@@ -405,11 +405,17 @@ class TestMain:
         """Test running install as __main__."""
         import runpy
         import sys
+        import warnings
 
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
         monkeypatch.setattr(sys, "argv", ["augment-dashboard-install"])
 
         with patch("augment_agent_dashboard.install.install_hooks"):
             with patch("augment_agent_dashboard.install.install_memory_hooks"):
-                runpy.run_module("augment_agent_dashboard.install", run_name="__main__")
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", RuntimeWarning)
+                    runpy.run_module(
+                        "augment_agent_dashboard.install",
+                        run_name="__main__"
+                    )
 

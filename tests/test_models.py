@@ -2,8 +2,6 @@
 
 from datetime import datetime, timezone
 
-import pytest
-
 from augment_agent_dashboard.models import AgentSession, SessionMessage, SessionStatus
 
 
