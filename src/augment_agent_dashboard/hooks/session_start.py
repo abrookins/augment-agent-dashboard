@@ -110,6 +110,22 @@ def run_hook() -> None:
             # Use state machine to set initial state
             result = state_machine.process_event(session, "session_start")
             log(f"  New session state: {result.new_state}")
+
+            # Check for pending initial prompt from dashboard
+            # Import here to avoid circular imports
+            from ..server import get_and_clear_pending_prompt
+            from ..models import SessionMessage
+
+            if workspace_root:
+                pending_prompt = get_and_clear_pending_prompt(workspace_root)
+                if pending_prompt:
+                    # Add the initial user message to the session
+                    session.messages.append(SessionMessage(
+                        role="user",
+                        content=pending_prompt,
+                    ))
+                    log(f"  Added initial prompt as user message")
+
             store.upsert_session(session)
             log(f"  Registered new session: {session_id}")
 

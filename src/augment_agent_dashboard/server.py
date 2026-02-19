@@ -67,6 +67,24 @@ def _get_loop_prompts() -> dict[str, dict[str, str]]:
     return DEFAULT_LOOP_PROMPTS.copy()
 
 
+# Default quick replies for sending to agents
+DEFAULT_QUICK_REPLIES: dict[str, str] = {
+    "Continue": "Continue working on the current task.",
+    "Stop": "Stop what you're doing and wait for further instructions.",
+    "Status": "Give me a brief status update on what you're working on.",
+    "Summarize": "Summarize what you've done so far in this session.",
+}
+
+
+def _get_quick_replies() -> dict[str, str]:
+    """Get quick replies from config file.
+
+    Returns a dict mapping reply names to their message content.
+    """
+    config = _get_full_config()
+    return config.get("quick_replies", DEFAULT_QUICK_REPLIES.copy())
+
+
 async def spawn_auggie_message(conversation_id: str, workspace_root: str, message: str) -> bool:
     """Spawn auggie subprocess to inject a message into a session.
 
@@ -124,6 +142,9 @@ async def spawn_new_session(workspace_root: str, prompt: str) -> bool:
         return False
 
     logger.info(f"Spawning new auggie session in {workspace_root}")
+
+    # Save the prompt so SessionStart hook can add it as initial user message
+    _save_pending_prompt(workspace_root, prompt)
 
     try:
         # Start auggie as a detached background process
@@ -226,6 +247,9 @@ async def create_new_session(
 
     if not prompt or not prompt.strip():
         raise HTTPException(status_code=400, detail="Prompt is required")
+
+    # Track the working directory for recent directories feature
+    _add_recent_working_directory(working_directory)
 
     # Spawn auggie in background
     background_tasks.add_task(spawn_new_session, working_directory, prompt.strip())
@@ -704,6 +728,47 @@ async def edit_prompt(
     return RedirectResponse(url="/config", status_code=303)
 
 
+@app.post("/config/quick-replies/add")
+async def add_quick_reply(
+    name: Annotated[str, Form()],
+    message: Annotated[str, Form()],
+):
+    """Add a new quick reply."""
+    config = _get_full_config()
+    quick_replies = config.get("quick_replies", DEFAULT_QUICK_REPLIES.copy())
+    quick_replies[name] = message
+    config["quick_replies"] = quick_replies
+    _save_full_config(config)
+    return RedirectResponse(url="/config", status_code=303)
+
+
+@app.post("/config/quick-replies/delete")
+async def delete_quick_reply(name: Annotated[str, Form()]):
+    """Delete a quick reply."""
+    config = _get_full_config()
+    quick_replies = config.get("quick_replies", DEFAULT_QUICK_REPLIES.copy())
+    if name in quick_replies:
+        del quick_replies[name]
+    config["quick_replies"] = quick_replies
+    _save_full_config(config)
+    return RedirectResponse(url="/config", status_code=303)
+
+
+@app.post("/config/quick-replies/edit")
+async def edit_quick_reply(
+    name: Annotated[str, Form()],
+    message: Annotated[str, Form()],
+):
+    """Edit an existing quick reply."""
+    config = _get_full_config()
+    quick_replies = config.get("quick_replies", DEFAULT_QUICK_REPLIES.copy())
+    if name in quick_replies:
+        quick_replies[name] = message
+    config["quick_replies"] = quick_replies
+    _save_full_config(config)
+    return RedirectResponse(url="/config", status_code=303)
+
+
 @app.post("/config/memory")
 async def save_memory_config(
     server_url: Annotated[str, Form()] = "",
@@ -839,6 +904,128 @@ def _save_full_config(config: dict) -> None:
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "config.json"
     config_path.write_text(json.dumps(config, indent=2))
+
+
+def _get_pending_prompts_path() -> Path:
+    """Get path to pending prompts file."""
+    return Path.home() / ".augment" / "dashboard" / "pending_prompts.json"
+
+
+def _save_pending_prompt(workspace_root: str, prompt: str) -> None:
+    """Save a pending initial prompt for a workspace.
+
+    When we spawn a new session, we don't have a session_id yet.
+    We save the prompt keyed by workspace_root so the SessionStart hook
+    can pick it up and add it as the initial user message.
+    """
+    import json
+    from datetime import datetime, timezone
+
+    path = _get_pending_prompts_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    pending = {}
+    if path.exists():
+        try:
+            pending = json.loads(path.read_text())
+        except Exception:
+            pass
+
+    # Store with timestamp so we can clean up old entries
+    pending[workspace_root] = {
+        "prompt": prompt,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    path.write_text(json.dumps(pending, indent=2))
+
+
+def get_and_clear_pending_prompt(workspace_root: str) -> str | None:
+    """Get and clear a pending initial prompt for a workspace.
+
+    Called by SessionStart hook to retrieve the initial user message.
+    Returns None if no pending prompt exists.
+    """
+    import json
+    from datetime import datetime, timedelta, timezone
+
+    path = _get_pending_prompts_path()
+    if not path.exists():
+        return None
+
+    try:
+        pending = json.loads(path.read_text())
+    except Exception:
+        return None
+
+    if workspace_root not in pending:
+        return None
+
+    entry = pending[workspace_root]
+    prompt = entry.get("prompt")
+    timestamp_str = entry.get("timestamp")
+
+    # Check if the prompt is recent (within last 5 minutes)
+    if timestamp_str:
+        try:
+            timestamp = datetime.fromisoformat(timestamp_str)
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.replace(tzinfo=timezone.utc)
+            age = datetime.now(timezone.utc) - timestamp
+            if age > timedelta(minutes=5):
+                # Too old, discard it
+                del pending[workspace_root]
+                path.write_text(json.dumps(pending, indent=2))
+                return None
+        except Exception:
+            pass
+
+    # Clear the pending prompt
+    del pending[workspace_root]
+    path.write_text(json.dumps(pending, indent=2))
+
+    return prompt
+
+
+def _get_recent_working_directories(limit: int = 5) -> list[str]:
+    """Get the most recent working directories from sessions and config.
+
+    Returns a list of unique working directories, most recent first.
+    """
+    store = get_store()
+    sessions = store.get_all_sessions()
+
+    # Get directories from sessions (already sorted by last_activity)
+    seen = set()
+    directories = []
+    for session in sessions:
+        workspace = session.workspace_root
+        if workspace and workspace not in seen:
+            seen.add(workspace)
+            directories.append(workspace)
+            if len(directories) >= limit:
+                break
+
+    return directories
+
+
+def _add_recent_working_directory(directory: str) -> None:
+    """Add a directory to recent working directories in config.
+
+    Keeps only the last 10 unique directories.
+    """
+    config = _get_full_config()
+    recent = config.get("recent_directories", [])
+
+    # Remove if already exists (will add to front)
+    if directory in recent:
+        recent.remove(directory)
+
+    # Add to front
+    recent.insert(0, directory)
+
+    # Keep only last 10
+    config["recent_directories"] = recent[:10]
+    _save_full_config(config)
 
 
 # Browser notification support - stores pending notifications for polling
@@ -1675,6 +1862,61 @@ def get_base_styles(dark_mode: str | None) -> str:
             }}
             .message-form button {{ width: auto; }}
         }}
+
+        /* Pull-to-refresh for mobile */
+        .pull-to-refresh {{
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 60px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: var(--bg-secondary);
+            transform: translateY(-100%);
+            transition: transform 0.2s ease-out;
+            z-index: 1000;
+            pointer-events: none;
+        }}
+        .pull-to-refresh.pulling {{
+            transform: translateY(calc(var(--pull-progress, 0) * 100% - 100%));
+        }}
+        .pull-to-refresh.refreshing {{
+            transform: translateY(0);
+        }}
+        .pull-to-refresh-spinner {{
+            width: 24px;
+            height: 24px;
+            border: 3px solid var(--border-color);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            opacity: var(--pull-progress, 0);
+        }}
+        .pull-to-refresh.refreshing .pull-to-refresh-spinner {{
+            animation: spin 0.8s linear infinite;
+            opacity: 1;
+        }}
+        .pull-to-refresh-text {{
+            margin-left: 10px;
+            font-size: 0.85em;
+            color: var(--text-secondary);
+            opacity: var(--pull-progress, 0);
+        }}
+        .pull-to-refresh.refreshing .pull-to-refresh-text {{
+            opacity: 1;
+        }}
+        @keyframes spin {{
+            to {{ transform: rotate(360deg); }}
+        }}
+        body.ptr-pulling {{
+            transform: translateY(calc(var(--pull-distance, 0px)));
+            transition: none;
+        }}
+        body.ptr-refreshing {{
+            transform: translateY(60px);
+            transition: transform 0.2s ease-out;
+        }}
     </style>
     """
 
@@ -1828,6 +2070,99 @@ def _get_notification_script() -> str:
     """
 
 
+def _get_pull_to_refresh_script() -> str:
+    """Get JavaScript for pull-to-refresh on mobile."""
+    return """
+        // Pull-to-refresh for mobile
+        (function() {
+            const ptrEl = document.getElementById('pull-to-refresh');
+            if (!ptrEl) return;
+
+            const ptrSpinner = ptrEl.querySelector('.pull-to-refresh-spinner');
+            const ptrText = ptrEl.querySelector('.pull-to-refresh-text');
+
+            let startY = 0;
+            let currentY = 0;
+            let isPulling = false;
+            let isRefreshing = false;
+            const threshold = 80;  // Pull distance to trigger refresh
+            const maxPull = 120;   // Max pull distance
+
+            function isTouchDevice() {
+                return 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+            }
+
+            // Only enable on touch devices
+            if (!isTouchDevice()) return;
+
+            document.addEventListener('touchstart', function(e) {
+                if (isRefreshing) return;
+                // Only trigger at top of page
+                if (window.scrollY > 5) return;
+
+                startY = e.touches[0].pageY;
+                isPulling = true;
+            }, { passive: true });
+
+            document.addEventListener('touchmove', function(e) {
+                if (!isPulling || isRefreshing) return;
+                if (window.scrollY > 5) {
+                    isPulling = false;
+                    return;
+                }
+
+                currentY = e.touches[0].pageY;
+                const pullDistance = Math.min(currentY - startY, maxPull);
+
+                if (pullDistance > 0) {
+                    const progress = Math.min(pullDistance / threshold, 1);
+                    ptrEl.style.setProperty('--pull-progress', progress);
+                    ptrEl.classList.add('pulling');
+                    document.body.style.setProperty('--pull-distance', pullDistance * 0.4 + 'px');
+                    document.body.classList.add('ptr-pulling');
+
+                    if (pullDistance >= threshold) {
+                        ptrText.textContent = 'Release to refresh';
+                    } else {
+                        ptrText.textContent = 'Pull to refresh';
+                    }
+                }
+            }, { passive: true });
+
+            document.addEventListener('touchend', function(e) {
+                if (!isPulling) return;
+                isPulling = false;
+
+                const pullDistance = currentY - startY;
+
+                if (pullDistance >= threshold && !isRefreshing) {
+                    // Trigger refresh
+                    isRefreshing = true;
+                    ptrEl.classList.remove('pulling');
+                    ptrEl.classList.add('refreshing');
+                    document.body.classList.remove('ptr-pulling');
+                    document.body.classList.add('ptr-refreshing');
+                    ptrText.textContent = 'Refreshing...';
+
+                    // Reload the page
+                    setTimeout(() => {
+                        location.reload();
+                    }, 300);
+                } else {
+                    // Reset
+                    ptrEl.classList.remove('pulling');
+                    ptrEl.style.setProperty('--pull-progress', 0);
+                    document.body.classList.remove('ptr-pulling');
+                    document.body.style.setProperty('--pull-distance', '0px');
+                }
+
+                startY = 0;
+                currentY = 0;
+            }, { passive: true });
+        })();
+    """
+
+
 def _get_timestamp_script() -> str:
     """Get JavaScript to localize UTC timestamps to local timezone on hover."""
     return """
@@ -1944,9 +2279,71 @@ def _render_session_cards(sessions: list) -> str:
     return session_cards
 
 
+def _render_recent_directories_html() -> str:
+    """Render the recent directories picker HTML."""
+    recent_dirs = _get_recent_working_directories(limit=5)
+    if not recent_dirs:
+        return ""
+
+    dirs_html = ""
+    for directory in recent_dirs:
+        escaped_dir = html.escape(directory)
+        # Show shortened path for display
+        display_dir = directory
+        if len(display_dir) > 40:
+            display_dir = "..." + display_dir[-37:]
+        escaped_display = html.escape(display_dir)
+        dirs_html += f'''
+            <button type="button" class="recent-dir-btn"
+                onclick="selectRecentDir('{escaped_dir}')"
+                title="{escaped_dir}">📁 {escaped_display}</button>
+        '''
+
+    return f'''
+        <div class="recent-dirs-section">
+            <label class="field-label">Recent Directories:</label>
+            <div class="recent-dirs-list">{dirs_html}</div>
+        </div>
+    '''
+
+
+def _get_recent_dirs_styles() -> str:
+    """Get CSS styles for recent directories picker."""
+    return """
+        .recent-dirs-section {
+            margin-bottom: 12px;
+        }
+        .recent-dirs-list {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            margin-top: 4px;
+        }
+        .recent-dir-btn {
+            text-align: left;
+            padding: 6px 10px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            color: var(--text-primary);
+            font-size: 13px;
+            cursor: pointer;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .recent-dir-btn:hover {
+            background: var(--bg-hover);
+            border-color: var(--accent-color);
+        }
+    """
+
+
 def render_dashboard(sessions: list, dark_mode: str | None, sort_by: str = "recent") -> str:
     """Render the main dashboard HTML."""
     styles = get_base_styles(dark_mode)
+    recent_dirs_styles = _get_recent_dirs_styles()
+    recent_dirs_html = _render_recent_directories_html()
 
     session_cards = _render_session_cards(sessions)
 
@@ -1969,8 +2366,13 @@ def render_dashboard(sessions: list, dark_mode: str | None, sort_by: str = "rece
         <link rel="apple-touch-icon" href="/icon-192.png">
         <meta name="theme-color" content="#6366f1">
         {styles}
+        <style>{recent_dirs_styles}</style>
     </head>
     <body>
+        <div id="pull-to-refresh" class="pull-to-refresh">
+            <div class="pull-to-refresh-spinner"></div>
+            <span class="pull-to-refresh-text">Pull to refresh</span>
+        </div>
         <div class="header">
             <h1>🤖 Augment Agent Dashboard</h1>
             <div class="nav-links">
@@ -1990,6 +2392,7 @@ def render_dashboard(sessions: list, dark_mode: str | None, sort_by: str = "rece
             </button>
             <div id="new-session-form" class="new-session-form-container">
                 <form method="POST" action="/session/new">
+                    {recent_dirs_html}
                     <div style="margin-bottom:15px;">
                         <label for="working_directory" class="field-label">
                             Working Directory
@@ -2012,6 +2415,9 @@ def render_dashboard(sessions: list, dark_mode: str | None, sort_by: str = "rece
                 const form = document.getElementById('new-session-form');
                 form.style.display = form.style.display === 'none' ? 'block' : 'none';
             }}
+            function selectRecentDir(dir) {{
+                document.getElementById('working_directory').value = dir;
+            }}
         </script>
         <div class="session-list" id="session-list">
             {session_cards}
@@ -2019,6 +2425,7 @@ def render_dashboard(sessions: list, dark_mode: str | None, sort_by: str = "rece
         <script>
             {_get_notification_script()}
             {_get_timestamp_script()}
+            {_get_pull_to_refresh_script()}
 
             // AJAX-based session list updates
             const REFRESH_INTERVAL = 5000;
@@ -2314,6 +2721,8 @@ def render_dashboard_swimlanes(
     """Render the dashboard with swim lanes for multiple machines."""
     styles = get_base_styles(dark_mode)
     swimlane_styles = _get_swimlane_styles()
+    recent_dirs_styles = _get_recent_dirs_styles()
+    recent_dirs_html = _render_recent_directories_html()
 
     dark_param = f"&dark={dark_mode}" if dark_mode else ""
     recent_active = "font-weight:bold;" if sort_by == "recent" else ""
@@ -2367,8 +2776,13 @@ def render_dashboard_swimlanes(
         <meta name="theme-color" content="#6366f1">
         {styles}
         {swimlane_styles}
+        <style>{recent_dirs_styles}</style>
     </head>
     <body>
+        <div id="pull-to-refresh" class="pull-to-refresh">
+            <div class="pull-to-refresh-spinner"></div>
+            <span class="pull-to-refresh-text">Pull to refresh</span>
+        </div>
         <div class="header">
             <h1>🤖 Augment Agent Dashboard</h1>
             <div class="nav-links">
@@ -2400,6 +2814,7 @@ def render_dashboard_swimlanes(
                 <div class="machine-label" id="new-session-machine">on: This Machine</div>
                 <form id="new-session-form" method="POST" action="/session/new">
                     <input type="hidden" id="new-session-origin" name="origin" value="local">
+                    {recent_dirs_html}
                     <div style="margin-bottom:15px;">
                         <label class="field-label">Working Directory</label>
                         <input type="text" id="working_directory" name="working_directory"
@@ -2423,6 +2838,7 @@ def render_dashboard_swimlanes(
         <script>
             {_get_notification_script()}
             {_get_timestamp_script()}
+            {_get_pull_to_refresh_script()}
 
             // Swim lane scroll indicator updates
             const swimLanes = document.getElementById('swim-lanes');
@@ -2470,6 +2886,10 @@ def render_dashboard_swimlanes(
 
             function closeNewSession() {{
                 document.getElementById('new-session-overlay').classList.remove('active');
+            }}
+
+            function selectRecentDir(dir) {{
+                document.getElementById('working_directory').value = dir;
             }}
 
             // Close on Escape
@@ -2535,13 +2955,12 @@ def _render_memory_config_section(config: dict) -> str:
     status_text = "Configured" if enabled else "Not configured"
 
     return f'''
-        <h2>🧠 Agent Memory</h2>
-        <p style="color:var(--text-secondary);margin-bottom:15px;">
+        <p class="section-description">
             Configure the Agent Memory Server to persist context across sessions.
             Settings are applied when hooks run (no restart needed).
         </p>
 
-        <div class="prompt-card">
+        <div class="config-card">
             <div class="memory-status">
                 <span class="status-dot" style="background:{status_color};"></span>
                 <strong>Status: {status_text}</strong>
@@ -2550,19 +2969,31 @@ def _render_memory_config_section(config: dict) -> str:
             <form method="POST" action="/config/memory">
                 <label class="field-label">Memory Server URL:</label>
                 <input type="text" name="server_url" value="{server_url}"
-                       placeholder="http://localhost:8000">
+                       placeholder="http://localhost:8000" style="width:100%;padding:8px;
+                       border:1px solid var(--border-color);border-radius:4px;
+                       background:var(--bg-secondary);color:var(--text-primary);
+                       font-size:13px;margin-bottom:8px;">
 
                 <label class="field-label">Namespace:</label>
                 <input type="text" name="namespace" value="{namespace}"
-                       placeholder="augment">
+                       placeholder="augment" style="width:100%;padding:8px;
+                       border:1px solid var(--border-color);border-radius:4px;
+                       background:var(--bg-secondary);color:var(--text-primary);
+                       font-size:13px;margin-bottom:8px;">
 
                 <label class="field-label">User ID:</label>
                 <input type="text" name="user_id" value="{user_id}"
-                       placeholder="your-user-id">
+                       placeholder="your-user-id" style="width:100%;padding:8px;
+                       border:1px solid var(--border-color);border-radius:4px;
+                       background:var(--bg-secondary);color:var(--text-primary);
+                       font-size:13px;margin-bottom:8px;">
 
                 <label class="field-label">API Key (optional):</label>
                 <input type="password" name="api_key" value="{api_key}"
-                       placeholder="Leave empty if not required">
+                       placeholder="Leave empty if not required" style="width:100%;
+                       padding:8px;border:1px solid var(--border-color);border-radius:4px;
+                       background:var(--bg-secondary);color:var(--text-primary);
+                       font-size:13px;margin-bottom:8px;">
 
                 <div class="memory-options">
                     <strong style="display:block;margin-bottom:10px;">Options</strong>
@@ -2598,8 +3029,8 @@ def _render_memory_config_section(config: dict) -> str:
                     </label>
                 </div>
 
-                <button type="submit" class="btn-enable" style="margin-top:15px;width:100%;">
-                    Save Memory Settings
+                <button type="submit" class="btn-primary" style="margin-top:12px;">
+                    Save Settings
                 </button>
             </form>
         </div>
@@ -2656,12 +3087,11 @@ def _render_federation_config_section(config: dict) -> str:
         )
 
     return f'''
-        <h2>🌐 Federation Settings</h2>
-        <p style="color:var(--text-secondary);margin-bottom:15px;">
+        <p class="section-description">
             Configure federation to connect multiple dashboards across machines.
         </p>
 
-        <div class="prompt-card">
+        <div class="config-card">
             <div class="memory-status">
                 <span class="status-dot" style="background:{status_color};"></span>
                 <strong>Status: {status_text}</strong>
@@ -2683,21 +3113,27 @@ def _render_federation_config_section(config: dict) -> str:
 
                 <label class="field-label">This Machine's Name:</label>
                 <input type="text" name="this_machine_name" value="{machine_name}"
-                       placeholder="e.g., Work Laptop">
+                       placeholder="e.g., Work Laptop" style="width:100%;padding:8px;
+                       border:1px solid var(--border-color);border-radius:4px;
+                       background:var(--bg-secondary);color:var(--text-primary);
+                       font-size:13px;margin-bottom:8px;">
 
                 <label class="field-label">API Key (for incoming connections):</label>
                 <input type="password" name="api_key" value="{api_key}"
-                       placeholder="Leave empty for no authentication">
+                       placeholder="Leave empty for no authentication" style="width:100%;
+                       padding:8px;border:1px solid var(--border-color);border-radius:4px;
+                       background:var(--bg-secondary);color:var(--text-primary);
+                       font-size:13px;margin-bottom:8px;">
 
-                <button type="submit" class="btn-enable" style="margin-top:15px;width:100%;">
-                    Save Federation Settings
+                <button type="submit" class="btn-primary" style="margin-top:8px;">
+                    Save Settings
                 </button>
             </form>
         </div>
 
-        <div class="prompt-card" style="margin-top:20px;">
-            <h3 style="margin-top:0;">Remote Dashboards</h3>
-            <p style="color:var(--text-secondary);font-size:0.9em;margin-bottom:15px;">
+        <div class="config-card" style="margin-top:12px;">
+            <strong style="display:block;margin-bottom:8px;">Remote Dashboards</strong>
+            <p style="color:var(--text-secondary);font-size:0.85em;margin-bottom:12px;">
                 Add other machines' dashboards to see their sessions.
             </p>
 
@@ -2705,24 +3141,82 @@ def _render_federation_config_section(config: dict) -> str:
                 {remotes_html}
             </div>
 
-            <hr style="margin:15px 0;border:none;border-top:1px solid var(--border-color);">
+            <div class="add-form" style="margin-top:12px;">
+                <form method="POST" action="/config/federation/remotes/add">
+                    <label class="field-label">Dashboard URL:</label>
+                    <input type="text" name="url" placeholder="http://other-machine:8080" required>
 
-            <form method="POST" action="/config/federation/remotes/add">
-                <label class="field-label">Dashboard URL:</label>
-                <input type="text" name="url" placeholder="http://other-machine:8080" required>
+                    <label class="field-label">Name:</label>
+                    <input type="text" name="name" placeholder="e.g., Home Desktop" required>
 
-                <label class="field-label">Name:</label>
-                <input type="text" name="name" placeholder="e.g., Home Desktop" required>
+                    <label class="field-label">API Key (if required):</label>
+                    <input type="password" name="remote_api_key"
+                           placeholder="Leave empty if not required" style="width:100%;
+                           padding:8px;border:1px solid var(--border-color);border-radius:4px;
+                           background:var(--bg-secondary);color:var(--text-primary);
+                           font-size:13px;margin-bottom:8px;">
 
-                <label class="field-label">API Key (if required):</label>
-                <input type="password" name="remote_api_key"
-                       placeholder="Leave empty if not required">
+                    <button type="submit" class="btn-primary">Add Remote</button>
+                </form>
+            </div>
+        </div>
+    '''
 
-                <button type="submit" class="btn-enable" style="margin-top:10px;width:100%;">
-                    Add Remote Dashboard
-                </button>
+
+def _render_quick_replies_config_section(config: dict) -> str:
+    """Render the quick replies configuration section."""
+    quick_replies = config.get("quick_replies", DEFAULT_QUICK_REPLIES.copy())
+
+    # Build quick reply cards
+    replies_html = ""
+    for name, message in quick_replies.items():
+        escaped_name = html.escape(name)
+        escaped_message = html.escape(message)
+        replies_html += f'''
+        <div class="config-card">
+            <div class="config-card-header">
+                <strong>{escaped_name}</strong>
+                <form method="POST" action="/config/quick-replies/delete" class="inline-form">
+                    <input type="hidden" name="name" value="{escaped_name}">
+                    <button type="submit" onclick="return confirm('Delete this quick reply?')"
+                        class="btn-icon btn-danger" title="Delete">🗑</button>
+                </form>
+            </div>
+            <form method="POST" action="/config/quick-replies/edit" class="config-edit-form">
+                <input type="hidden" name="name" value="{escaped_name}">
+                <label class="field-label">Message:</label>
+                <textarea name="message" rows="2">{escaped_message}</textarea>
+                <button type="submit" class="btn-primary btn-sm">Save</button>
             </form>
         </div>
+        '''
+
+    return f'''
+    <div class="config-section">
+        <div class="section-header" onclick="toggleSection('quick-replies-content')">
+            <h2>⚡ Quick Replies</h2>
+            <span class="section-toggle" id="quick-replies-toggle">▼</span>
+        </div>
+        <div class="section-content" id="quick-replies-content">
+            <p class="section-description">
+                Pre-configured messages for quick agent communication. Click a quick reply
+                button in a session to populate the message field.
+            </p>
+            {replies_html}
+            <div class="add-form">
+                <h4>Add New Quick Reply</h4>
+                <form method="POST" action="/config/quick-replies/add">
+                    <label class="field-label">Name (button label):</label>
+                    <input type="text" name="name"
+                        placeholder="e.g., 'Review Code'" required>
+                    <label class="field-label">Message:</label>
+                    <textarea name="message"
+                        placeholder="Enter the message to send" required></textarea>
+                    <button type="submit" class="btn-primary">Add Quick Reply</button>
+                </form>
+            </div>
+        </div>
+    </div>
     '''
 
 
@@ -2733,6 +3227,7 @@ def render_config_page(
 ) -> str:
     """Render the configuration page HTML."""
     styles = get_base_styles(dark_mode)
+    prompt_count = len(loop_prompts)
 
     # Build prompt list
     prompts_html = ""
@@ -2746,23 +3241,23 @@ def render_config_page(
             escaped_prompt = html.escape(prompt_config.get("prompt", ""))
             escaped_condition = html.escape(prompt_config.get("end_condition", ""))
         prompts_html += f'''
-        <div class="prompt-card">
-            <div class="prompt-header">
+        <div class="config-card">
+            <div class="config-card-header">
                 <strong>{escaped_name}</strong>
                 <form method="POST" action="/config/prompts/delete" class="inline-form">
                     <input type="hidden" name="name" value="{escaped_name}">
                     <button type="submit" onclick="return confirm('Delete this prompt?')"
-                        class="btn-delete btn-small">🗑</button>
+                        class="btn-icon btn-danger" title="Delete">🗑</button>
                 </form>
             </div>
-            <form method="POST" action="/config/prompts/edit" class="prompt-edit-form">
+            <form method="POST" action="/config/prompts/edit" class="config-edit-form">
                 <input type="hidden" name="name" value="{escaped_name}">
                 <label class="field-label">Prompt (instructions for the LLM):</label>
-                <textarea name="prompt" rows="4">{escaped_prompt}</textarea>
+                <textarea name="prompt" rows="3">{escaped_prompt}</textarea>
                 <label class="field-label">End Condition (stops loop when found):</label>
                 <input type="text" name="end_condition" value="{escaped_condition}"
                     placeholder="e.g., LOOP_COMPLETE: Task finished.">
-                <button type="submit" class="btn-enable" style="margin-top:8px;">Save</button>
+                <button type="submit" class="btn-primary btn-sm">Save</button>
             </form>
         </div>
         '''
@@ -2782,38 +3277,85 @@ def render_config_page(
         <meta name="theme-color" content="#6366f1">
         {styles}
         <style>
-            .prompt-card {{
+            /* Collapsible sections */
+            .config-section {{
                 background: var(--bg-secondary);
                 border: 1px solid var(--border-color);
                 border-radius: 8px;
-                padding: 12px;
-                margin-bottom: 12px;
+                margin-bottom: 16px;
+                overflow: hidden;
             }}
-            .prompt-header {{
+            .section-header {{
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                padding: 14px 16px;
+                cursor: pointer;
+                user-select: none;
+                background: var(--bg-secondary);
+            }}
+            .section-header:hover {{
+                background: var(--bg-hover);
+            }}
+            .section-header h2 {{
+                margin: 0;
+                font-size: 1.1em;
+            }}
+            .section-toggle {{
+                font-size: 0.9em;
+                color: var(--text-secondary);
+                transition: transform 0.2s;
+            }}
+            .section-content {{
+                padding: 0 16px 16px;
+                display: block;
+            }}
+            .section-content.collapsed {{
+                display: none;
+            }}
+            .section-description {{
+                color: var(--text-secondary);
+                margin-bottom: 15px;
+                font-size: 0.9em;
+            }}
+            .section-badge {{
+                background: var(--accent-color);
+                color: white;
+                padding: 2px 8px;
+                border-radius: 10px;
+                font-size: 0.75em;
+                margin-left: 8px;
+            }}
+            /* Config cards */
+            .config-card {{
+                background: var(--bg-primary);
+                border: 1px solid var(--border-color);
+                border-radius: 6px;
+                padding: 12px;
+                margin-bottom: 10px;
+            }}
+            .config-card-header {{
                 display: flex;
                 justify-content: space-between;
                 align-items: center;
                 margin-bottom: 8px;
             }}
-            .prompt-edit-form textarea,
-            .prompt-edit-form input[type="text"] {{
+            .config-edit-form textarea,
+            .config-edit-form input[type="text"] {{
                 width: 100%;
                 padding: 8px;
                 border: 1px solid var(--border-color);
                 border-radius: 4px;
-                background: var(--bg-primary);
+                background: var(--bg-secondary);
                 color: var(--text-primary);
                 font-family: inherit;
-                font-size: 14px;
+                font-size: 13px;
                 resize: vertical;
                 margin-bottom: 8px;
             }}
-            .prompt-edit-form input[type="text"] {{
-                resize: none;
-            }}
             .field-label {{
                 display: block;
-                font-size: 0.85em;
+                font-size: 0.8em;
                 color: var(--text-secondary);
                 margin-bottom: 4px;
                 margin-top: 8px;
@@ -2821,36 +3363,70 @@ def render_config_page(
             .field-label:first-of-type {{
                 margin-top: 0;
             }}
-            .add-prompt-form {{
+            /* Add forms */
+            .add-form {{
+                background: var(--bg-primary);
+                border: 1px dashed var(--border-color);
+                border-radius: 6px;
+                padding: 14px;
+                margin-top: 12px;
+            }}
+            .add-form h4 {{
+                margin: 0 0 12px 0;
+                font-size: 0.95em;
+                color: var(--text-secondary);
+            }}
+            .add-form input[type="text"],
+            .add-form textarea {{
+                width: 100%;
+                padding: 8px;
+                border: 1px solid var(--border-color);
+                border-radius: 4px;
                 background: var(--bg-secondary);
-                border: 1px solid var(--border-color);
-                border-radius: 8px;
-                padding: 15px;
-                margin-top: 20px;
-            }}
-            .add-prompt-form input[type="text"] {{
-                width: 100%;
-                padding: 10px;
-                border: 1px solid var(--border-color);
-                border-radius: 4px;
-                background: var(--bg-primary);
                 color: var(--text-primary);
-                font-size: 14px;
-                margin-bottom: 10px;
+                font-size: 13px;
+                margin-bottom: 8px;
             }}
-            .add-prompt-form textarea {{
-                width: 100%;
-                padding: 10px;
-                border: 1px solid var(--border-color);
-                border-radius: 4px;
-                background: var(--bg-primary);
-                color: var(--text-primary);
-                font-family: inherit;
-                font-size: 14px;
+            .add-form textarea {{
+                min-height: 60px;
                 resize: vertical;
-                min-height: 80px;
-                margin-bottom: 10px;
+                font-family: inherit;
             }}
+            /* Button styles */
+            .btn-primary {{
+                padding: 8px 16px;
+                background: var(--accent-color);
+                color: white;
+                border: none;
+                border-radius: 4px;
+                cursor: pointer;
+                font-size: 13px;
+                font-weight: 500;
+            }}
+            .btn-primary:hover {{
+                opacity: 0.9;
+            }}
+            .btn-sm {{
+                padding: 5px 10px;
+                font-size: 12px;
+            }}
+            .btn-icon {{
+                padding: 4px 8px;
+                background: transparent;
+                border: 1px solid var(--border-color);
+                border-radius: 4px;
+                cursor: pointer;
+                font-size: 14px;
+            }}
+            .btn-danger {{
+                color: var(--status-active);
+                border-color: var(--status-active);
+            }}
+            .btn-danger:hover {{
+                background: var(--status-active);
+                color: white;
+            }}
+            /* Legacy styles for federation/memory sections */
             .memory-status {{
                 display: flex;
                 align-items: center;
@@ -2918,37 +3494,78 @@ def render_config_page(
         <a href="/" class="back-link">← Back to Dashboard</a>
         <h1>⚙️ Configuration</h1>
 
-        <h2>Loop Prompts</h2>
-        <p style="color:var(--text-secondary);margin-bottom:15px;">
-            Configure loop prompts with end conditions. The prompt tells the LLM what to do
-            and should explain the end condition. When the LLM includes the end condition
-            text in its response, the loop stops.
-        </p>
+        <!-- Quick Replies Section (expanded by default - fewer items) -->
+        {_render_quick_replies_config_section(config)}
 
-        {prompts_html}
-
-        <div class="add-prompt-form">
-            <h3>Add New Prompt</h3>
-            <form method="POST" action="/config/prompts/add">
-                <label class="field-label">Name:</label>
-                <input type="text" name="name" placeholder="e.g., 'Security Review'" required>
-                <label class="field-label">Prompt (instructions for the LLM):</label>
-                <textarea name="prompt" placeholder="Enter instructions for the agent."
-                    required></textarea>
-                <label class="field-label">End Condition (text that stops the loop):</label>
-                <input type="text" name="end_condition"
-                    placeholder="e.g., LOOP_COMPLETE: Done.">
-                <button type="submit" class="btn-enable" style="width:100%;">Add Prompt</button>
-            </form>
+        <!-- Loop Prompts Section (collapsed by default - many items) -->
+        <div class="config-section">
+            <div class="section-header" onclick="toggleSection('loop-prompts-content')">
+                <h2>🔄 Loop Prompts <span class="section-badge">{prompt_count}</span></h2>
+                <span class="section-toggle" id="loop-prompts-toggle">▶</span>
+            </div>
+            <div class="section-content collapsed" id="loop-prompts-content">
+                <p class="section-description">
+                    Configure loop prompts with end conditions. The prompt tells the LLM what to do
+                    and should explain the end condition. When the LLM includes the end condition
+                    text in its response, the loop stops.
+                </p>
+                {prompts_html}
+                <div class="add-form">
+                    <h4>Add New Prompt</h4>
+                    <form method="POST" action="/config/prompts/add">
+                        <label class="field-label">Name:</label>
+                        <input type="text" name="name"
+                            placeholder="e.g., 'Security Review'" required>
+                        <label class="field-label">Prompt (instructions):</label>
+                        <textarea name="prompt"
+                            placeholder="Enter instructions for the agent."
+                            required></textarea>
+                        <label class="field-label">End Condition:</label>
+                        <input type="text" name="end_condition"
+                            placeholder="e.g., LOOP_COMPLETE: Done.">
+                        <button type="submit" class="btn-primary">Add Prompt</button>
+                    </form>
+                </div>
+            </div>
         </div>
 
-        <hr style="margin: 30px 0; border: none; border-top: 1px solid var(--border-color);">
+        <!-- Federation Section -->
+        <div class="config-section">
+            <div class="section-header" onclick="toggleSection('federation-content')">
+                <h2>🌐 Federation</h2>
+                <span class="section-toggle" id="federation-toggle">▼</span>
+            </div>
+            <div class="section-content" id="federation-content">
+                {_render_federation_config_section(config)}
+            </div>
+        </div>
 
-        {_render_federation_config_section(config)}
+        <!-- Memory Section -->
+        <div class="config-section">
+            <div class="section-header" onclick="toggleSection('memory-content')">
+                <h2>🧠 Memory</h2>
+                <span class="section-toggle" id="memory-toggle">▼</span>
+            </div>
+            <div class="section-content" id="memory-content">
+                {_render_memory_config_section(config)}
+            </div>
+        </div>
 
-        <hr style="margin: 30px 0; border: none; border-top: 1px solid var(--border-color);">
+        <script>
+            function toggleSection(sectionId) {{
+                const content = document.getElementById(sectionId);
+                const toggleId = sectionId.replace('-content', '-toggle');
+                const toggle = document.getElementById(toggleId);
 
-        {_render_memory_config_section(config)}
+                if (content.classList.contains('collapsed')) {{
+                    content.classList.remove('collapsed');
+                    toggle.textContent = '▼';
+                }} else {{
+                    content.classList.add('collapsed');
+                    toggle.textContent = '▶';
+                }}
+            }}
+        </script>
     </body>
     </html>
     """
@@ -2973,8 +3590,60 @@ def _format_elapsed_time(started_at: datetime | None) -> str:
         return f"{seconds}s"
 
 
+def _render_quick_replies_html(session_id: str) -> str:
+    """Render quick reply buttons for the message form."""
+    quick_replies = _get_quick_replies()
+    if not quick_replies:
+        return ""
+
+    buttons_html = ""
+    for name, message in quick_replies.items():
+        escaped_name = html.escape(name)
+        escaped_message = html.escape(message).replace("'", "\\'")
+        buttons_html += f'''
+            <button type="button" class="quick-reply-btn"
+                onclick="insertQuickReply('{escaped_message}')"
+                title="{escaped_message}">⚡ {escaped_name}</button>
+        '''
+
+    return f'''
+        <div class="quick-replies-section">
+            <label class="field-label" style="margin-bottom:6px;">Quick Replies:</label>
+            <div class="quick-replies-list">{buttons_html}</div>
+        </div>
+    '''
+
+
+def _get_quick_replies_styles() -> str:
+    """Get CSS styles for quick replies section."""
+    return """
+        .quick-replies-section {
+            margin-bottom: 12px;
+        }
+        .quick-replies-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+        .quick-reply-btn {
+            padding: 5px 10px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            color: var(--text-primary);
+            font-size: 12px;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+        .quick-reply-btn:hover {
+            background: var(--bg-hover);
+            border-color: var(--accent-color);
+        }
+    """
+
+
 def _render_message_form(session) -> str:
-    """Render the message form with queue support."""
+    """Render the message form with queue support and quick replies."""
     from augment_agent_dashboard.models import SessionStatus
 
     # Count queued messages
@@ -2984,11 +3653,14 @@ def _render_message_form(session) -> str:
         queue_info = f'<span class="queue-count">({queued_count} queued)</span>'
 
     sid = session.session_id
+    quick_replies_html = _render_quick_replies_html(sid)
+
     if session.status == SessionStatus.ACTIVE:
         return f'''
             <div class="status-banner status-active">
                 ⏳ Agent working. Messages queued. {queue_info}
             </div>
+            {quick_replies_html}
             <form method="POST" action="/session/{sid}/queue">
                 <textarea id="message-input" name="message"
                     placeholder="Type a message to queue..."></textarea>
@@ -3001,6 +3673,7 @@ def _render_message_form(session) -> str:
             <p style="color: var(--text-secondary); margin-bottom: 10px;">
                 Send a message directly, or queue it for later. {queue_info}
             </p>
+            {quick_replies_html}
             <form method="POST" action="/session/{sid}/message" class="message-form">
                 <textarea id="message-input" name="message"
                     placeholder="Type a message for the agent..."></textarea>
@@ -3216,6 +3889,7 @@ def render_session_detail(
 ) -> str:
     """Render the session detail HTML."""
     styles = get_base_styles(dark_mode)
+    quick_replies_styles = _get_quick_replies_styles()
 
     # Render message history
     messages_html, queued_count = _render_messages_html(session)
@@ -3244,9 +3918,14 @@ def render_session_detail(
         <meta name="apple-mobile-web-app-title" content="Augment">
         <link rel="apple-touch-icon" href="/icon-192.png">
         <meta name="theme-color" content="#6366f1">
+        <style>{quick_replies_styles}</style>
         {styles}
     </head>
     <body>
+        <div id="pull-to-refresh" class="pull-to-refresh">
+            <div class="pull-to-refresh-spinner"></div>
+            <span class="pull-to-refresh-text">Pull to refresh</span>
+        </div>
         <a href="/" class="back-link">← Back to Dashboard</a>
 
         <div class="header">
@@ -3296,6 +3975,16 @@ def render_session_detail(
 
         <script>
             {_get_timestamp_script()}
+            {_get_pull_to_refresh_script()}
+
+            // Insert quick reply into message input
+            function insertQuickReply(message) {{
+                const textarea = document.getElementById('message-input');
+                if (textarea) {{
+                    textarea.value = message;
+                    textarea.focus();
+                }}
+            }}
 
             // Copy message to clipboard
             async function copyMessage(btn, base64Content) {{
