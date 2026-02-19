@@ -70,6 +70,17 @@ def check_goal_completion(agent_text: str, config: dict) -> bool:
     return False
 
 
+def _notifications_disabled() -> bool:
+    """Check if notifications should be disabled.
+
+    Notifications are disabled when:
+    - PYTEST_CURRENT_TEST is set (running under pytest)
+    - AUGMENT_DASHBOARD_TESTING is set (explicit test mode)
+    """
+    import os
+    return bool(os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("AUGMENT_DASHBOARD_TESTING"))
+
+
 def send_notification(
     title: str,
     message: str,
@@ -79,6 +90,10 @@ def send_notification(
     sound: bool = True,
 ) -> None:
     """Send a desktop notification using terminal-notifier if available."""
+    # Skip notifications during test runs
+    if _notifications_disabled():
+        return
+
     # URL to open the session in the dashboard
     session_url = f"http://localhost:{port}/session/{urllib.parse.quote(session_id, safe='')}"
 
@@ -116,6 +131,10 @@ def send_notification(
 
 def send_browser_notification(title: str, body: str, url: str, port: int = 9000) -> None:
     """Send a browser notification via the dashboard API."""
+    # Skip notifications during test runs
+    if _notifications_disabled():
+        return
+
     import urllib.request
 
     try:
@@ -230,10 +249,15 @@ def run_hook() -> None:
         if existing:
             session = existing
             # Add messages to existing session
-            # Check if user message already exists (may have been added by UI)
+            # Check if user message already exists (may have been added by UI or loop)
             if user_prompt:
+                user_prompt_stripped = user_prompt.strip()
                 user_msg_exists = any(
-                    m.role == "user" and m.content.strip() == user_prompt.strip()
+                    m.role == "user" and (
+                        m.content.strip() == user_prompt_stripped or
+                        # Also check if this is a loop prompt that contains the user prompt
+                        (m.content.startswith("🔄") and user_prompt_stripped in m.content)
+                    )
                     for m in session.messages[-5:]  # Check recent messages only
                 )
                 if not user_msg_exists:
@@ -354,6 +378,11 @@ def run_hook() -> None:
                 # Transition to LOOP_PROMPTING
                 state_machine.process_event(session, "evaluate")
                 session.loop_count += 1
+
+                # Add the loop prompt as a user message so it shows in the conversation
+                session.messages.append(
+                    SessionMessage(role="user", content=f"🔄 **Loop Prompt ({session.loop_count}):**\n{loop_prompt}")
+                )
                 store.upsert_session(session)
 
                 # Spawn auggie with the loop prompt

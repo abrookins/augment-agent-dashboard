@@ -67,22 +67,97 @@ def _get_loop_prompts() -> dict[str, dict[str, str]]:
     return DEFAULT_LOOP_PROMPTS.copy()
 
 
-# Default quick replies for sending to agents
-DEFAULT_QUICK_REPLIES: dict[str, str] = {
-    "Continue": "Continue working on the current task.",
-    "Stop": "Stop what you're doing and wait for further instructions.",
-    "Status": "Give me a brief status update on what you're working on.",
-    "Summarize": "Summarize what you've done so far in this session.",
-}
-
-
 def _get_quick_replies() -> dict[str, str]:
     """Get quick replies from config file.
 
     Returns a dict mapping reply names to their message content.
+    Starts empty - users add their own quick replies via config.
     """
     config = _get_full_config()
-    return config.get("quick_replies", DEFAULT_QUICK_REPLIES.copy())
+    return config.get("quick_replies", {})
+
+
+def _get_agent_timeout_minutes() -> int:
+    """Get the agent timeout threshold in minutes from config.
+
+    If a session is in a busy state and hasn't had activity for this long,
+    it will be considered timed out (agent may have crashed).
+
+    Default: 15 minutes.
+    """
+    config = _get_full_config()
+    return config.get("agent_timeout_minutes", 15)
+
+
+def check_and_reset_timed_out_sessions() -> list[str]:
+    """Check for sessions that have timed out and reset them.
+
+    A session is considered timed out if:
+    - It's in a busy state (ACTIVE, UNDER_REVIEW, LOOP_PROMPTING)
+    - last_activity is older than agent_timeout_minutes
+
+    Returns a list of session IDs that were reset.
+
+    Note: This only resets the sessions. To also process queued messages,
+    use check_timeouts_and_process_queues() instead.
+    """
+    from .models import SessionMessage
+    from .state_machine import SessionState
+
+    store = get_store()
+    timeout_minutes = _get_agent_timeout_minutes()
+    now = datetime.now(timezone.utc)
+
+    reset_session_ids = []
+
+    for session in store.get_all_sessions():
+        # Only check sessions in busy states
+        if not session.state.is_busy():
+            continue
+
+        # Calculate time since last activity
+        time_since_activity = now - session.last_activity
+        minutes_inactive = time_since_activity.total_seconds() / 60
+
+        if minutes_inactive >= timeout_minutes:
+            # Session has timed out - reset it
+            old_state = session.state
+            session.state = SessionState.IDLE
+            session.loop_enabled = False
+
+            # Add a system message about the timeout
+            session.messages.append(
+                SessionMessage(
+                    role="system",
+                    content=(
+                        f"⚠️ **Agent timed out** - no activity for {int(minutes_inactive)} minutes "
+                        f"(was in state: {old_state.value}). Session reset to idle."
+                    )
+                )
+            )
+            session.last_activity = now
+            store.upsert_session(session)
+            reset_session_ids.append(session.session_id)
+
+    return reset_session_ids
+
+
+async def check_timeouts_and_process_queues() -> list[str]:
+    """Check for timed out sessions and process any queued messages.
+
+    This is the main entry point for timeout checking. It:
+    1. Resets any timed out sessions to IDLE
+    2. Processes queued messages for those sessions
+
+    Returns list of session IDs that were reset.
+    """
+    reset_session_ids = check_and_reset_timed_out_sessions()
+
+    # Process queued messages for each reset session
+    for session_id in reset_session_ids:
+        await process_queued_messages(session_id)
+
+    return reset_session_ids
 
 
 async def spawn_auggie_message(conversation_id: str, workspace_root: str, message: str) -> bool:
@@ -123,6 +198,52 @@ async def spawn_auggie_message(conversation_id: str, workspace_root: str, messag
     except Exception as e:
         logger.exception(f"Error spawning auggie: {e}")
         return False
+
+
+async def process_queued_messages(session_id: str) -> bool:
+    """Process queued messages for an idle session.
+
+    If the session has queued messages and is idle, sends the first one.
+    Returns True if a message was sent, False otherwise.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    store = get_store()
+    session = store.get_session(session_id)
+
+    if not session:
+        return False
+
+    # Only process if session is idle
+    from .state_machine import SessionState
+    if session.state != SessionState.IDLE:
+        return False
+
+    # Check for queued messages
+    queued_messages = [m for m in session.messages if m.role == "queued"]
+    if not queued_messages:
+        return False
+
+    # Get the first queued message
+    next_msg = queued_messages[0]
+    message_content = next_msg.content
+
+    # Convert queued message to user message
+    next_msg.role = "user"
+    store.upsert_session(session)
+
+    logger.info(f"Processing queued message for session {session_id}")
+
+    # Send the message
+    if session.workspace_root and session.conversation_id:
+        return await spawn_auggie_message(
+            session.conversation_id,
+            session.workspace_root,
+            message_content,
+        )
+
+    return False
 
 
 async def spawn_new_session(workspace_root: str, prompt: str) -> bool:
@@ -167,6 +288,9 @@ async def spawn_new_session(workspace_root: str, prompt: str) -> bool:
 async def dashboard(request: Request):
     """Main dashboard view showing all sessions."""
     from .federation.client import RemoteDashboardClient
+
+    # Check for timed out sessions and process any queued messages
+    await check_timeouts_and_process_queues()
 
     store = get_store()
     local_sessions = store.get_all_sessions()
@@ -269,6 +393,9 @@ async def session_detail(session_id: str, request: Request):
         is_remote_session_id,
         parse_remote_session_id,
     )
+
+    # Check for timed out sessions and process any queued messages
+    await check_timeouts_and_process_queues()
 
     dark_mode = request.query_params.get("dark", None)
     loop_prompts = _get_loop_prompts()
@@ -458,6 +585,55 @@ async def send_message_to_remote(
     return RedirectResponse(url=f"/session/{session_id}", status_code=303)
 
 
+@app.post("/api/remote/session/{session_id}/delete")
+async def delete_remote_session(session_id: str):
+    """Delete a remote session by proxying to its origin dashboard."""
+    import logging
+    logger = logging.getLogger(__name__)
+
+    from .federation.client import (
+        RemoteDashboardClient,
+        find_remote_by_hash,
+        is_remote_session_id,
+        parse_remote_session_id,
+    )
+
+    if not is_remote_session_id(session_id):
+        raise HTTPException(status_code=400, detail="Not a remote session ID")
+
+    parsed = parse_remote_session_id(session_id)
+    if not parsed:
+        raise HTTPException(status_code=400, detail="Invalid remote session ID format")
+
+    url_hash, remote_session_id = parsed
+    logger.info(f"Deleting remote session: url_hash={url_hash}, remote_session_id={remote_session_id}")
+
+    fed_config = _get_federation_config()
+
+    # Find the remote dashboard
+    remote = find_remote_by_hash(fed_config.remote_dashboards, url_hash)
+    if not remote:
+        logger.warning(f"Remote dashboard not found for hash {url_hash}")
+        raise HTTPException(
+            status_code=404,
+            detail="Remote dashboard not found - it may have been removed from config"
+        )
+
+    logger.info(f"Found remote dashboard: {remote.name} at {remote.url}")
+
+    # Delete the session via the remote dashboard's API
+    client = RemoteDashboardClient(remote)
+    success = await client.delete_session(remote_session_id)
+
+    if not success:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to delete session on remote dashboard '{remote.name}'"
+        )
+
+    return RedirectResponse(url="/", status_code=303)
+
+
 @app.get("/api/sessions")
 async def api_list_sessions(
     status: Annotated[str | None, Query()] = None,
@@ -629,8 +805,18 @@ async def api_session_messages_html(session_id: str):
 
 
 @app.post("/session/{session_id}/loop/enable")
-async def enable_loop(session_id: str, prompt_name: Annotated[str, Form()]):
-    """Enable the quality loop for a session with a specific prompt."""
+async def enable_loop(
+    session_id: str,
+    prompt_name: Annotated[str, Form()],
+    background_tasks: BackgroundTasks,
+):
+    """Enable the quality loop for a session with a specific prompt.
+
+    If the session is idle, sends the initial loop prompt immediately.
+    """
+    from .models import SessionMessage
+    from .state_machine import SessionState
+
     store = get_store()
     session = store.get_session(session_id)
 
@@ -641,7 +827,35 @@ async def enable_loop(session_id: str, prompt_name: Annotated[str, Form()]):
     session.loop_count = 0
     session.loop_prompt_name = prompt_name
     session.loop_started_at = datetime.now(timezone.utc)
-    store.upsert_session(session)
+
+    # Get the loop prompt configuration
+    loop_prompts = _get_loop_prompts()
+    prompt_config = loop_prompts.get(prompt_name, {})
+    if isinstance(prompt_config, str):
+        loop_prompt = prompt_config
+    else:
+        loop_prompt = prompt_config.get("prompt", "Continue working on the task.")
+
+    # If session is idle, send the initial prompt immediately
+    is_idle = session.state in (SessionState.IDLE, SessionState.READY_FOR_LOOP, SessionState.TURN_COMPLETE)
+    if is_idle and session.workspace_root and session.conversation_id:
+        session.loop_count = 1
+
+        # Add the loop prompt as a user message so it shows in the conversation
+        session.messages.append(
+            SessionMessage(role="user", content=f"🔄 **Loop Started ({prompt_name}):**\n{loop_prompt}")
+        )
+        store.upsert_session(session)
+
+        # Spawn auggie with the loop prompt in background
+        background_tasks.add_task(
+            spawn_auggie_message,
+            session.conversation_id,
+            session.workspace_root,
+            loop_prompt,
+        )
+    else:
+        store.upsert_session(session)
 
     return RedirectResponse(url=f"/session/{session_id}", status_code=303)
 
@@ -663,15 +877,40 @@ async def pause_loop(session_id: str):
 
 @app.post("/session/{session_id}/loop/reset")
 async def reset_loop(session_id: str):
-    """Reset the loop counter for a session."""
+    """Reset the loop counter and session state.
+
+    This is a manual recovery mechanism for stuck sessions. It:
+    - Resets loop_count to 0
+    - Disables the loop
+    - Sets session state to IDLE
+    - Adds a system message noting the manual reset
+    """
+    from .models import SessionMessage
+    from .state_machine import SessionState
+
     store = get_store()
     session = store.get_session(session_id)
 
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
+    old_state = session.state
     session.loop_count = 0
+    session.loop_enabled = False
+    session.state = SessionState.IDLE
+
+    # Add a system message about the reset
+    session.messages.append(
+        SessionMessage(
+            role="system",
+            content=f"⚠️ **Session manually reset** (was in state: {old_state.value})"
+        )
+    )
+    session.last_activity = datetime.now(timezone.utc)
     store.upsert_session(session)
+
+    # Process any queued messages now that session is idle
+    await process_queued_messages(session_id)
 
     return RedirectResponse(url=f"/session/{session_id}", status_code=303)
 
@@ -735,7 +974,7 @@ async def add_quick_reply(
 ):
     """Add a new quick reply."""
     config = _get_full_config()
-    quick_replies = config.get("quick_replies", DEFAULT_QUICK_REPLIES.copy())
+    quick_replies = config.get("quick_replies", {})
     quick_replies[name] = message
     config["quick_replies"] = quick_replies
     _save_full_config(config)
@@ -746,7 +985,7 @@ async def add_quick_reply(
 async def delete_quick_reply(name: Annotated[str, Form()]):
     """Delete a quick reply."""
     config = _get_full_config()
-    quick_replies = config.get("quick_replies", DEFAULT_QUICK_REPLIES.copy())
+    quick_replies = config.get("quick_replies", {})
     if name in quick_replies:
         del quick_replies[name]
     config["quick_replies"] = quick_replies
@@ -761,10 +1000,23 @@ async def edit_quick_reply(
 ):
     """Edit an existing quick reply."""
     config = _get_full_config()
-    quick_replies = config.get("quick_replies", DEFAULT_QUICK_REPLIES.copy())
+    quick_replies = config.get("quick_replies", {})
     if name in quick_replies:
         quick_replies[name] = message
     config["quick_replies"] = quick_replies
+    _save_full_config(config)
+    return RedirectResponse(url="/config", status_code=303)
+
+
+@app.post("/config/agent-settings")
+async def save_agent_settings(
+    agent_timeout_minutes: Annotated[int, Form()],
+    max_loop_iterations: Annotated[int, Form()],
+):
+    """Save agent settings (timeout, loop limits)."""
+    config = _get_full_config()
+    config["agent_timeout_minutes"] = max(1, min(120, agent_timeout_minutes))
+    config["max_loop_iterations"] = max(1, min(500, max_loop_iterations))
     _save_full_config(config)
     return RedirectResponse(url="/config", status_code=303)
 
@@ -1216,6 +1468,7 @@ def get_base_styles(dark_mode: str | None) -> str:
                 --text-primary: #eee;
                 --text-secondary: #aaa;
                 --border-color: #333;
+                --bg-hover: #1f2937;
             }
         }
         """
@@ -1229,7 +1482,9 @@ def get_base_styles(dark_mode: str | None) -> str:
             --text-primary: {text_primary};
             --text-secondary: {text_secondary};
             --border-color: {border_color};
+            --bg-hover: {"#1f2937" if color_scheme == "dark" else "#e5e7eb"};
             --accent: #4a9eff;
+            --accent-color: #4a9eff;
             /* Legacy status colors */
             --status-active: #4ade80;
             --status-idle: #fbbf24;
@@ -2431,7 +2686,30 @@ def render_dashboard(sessions: list, dark_mode: str | None, sort_by: str = "rece
             const REFRESH_INTERVAL = 5000;
             const sortBy = '{sort_by}';
 
+            // Track scrolling state - pause refresh while scrolling
+            let isScrolling = false;
+            let scrollTimeout = null;
+            const SCROLL_DEBOUNCE = 1500; // Wait 1.5s after scrolling stops before refresh
+
+            // Track scroll on session list and window
+            function handleScroll() {{
+                isScrolling = true;
+                if (scrollTimeout) clearTimeout(scrollTimeout);
+                scrollTimeout = setTimeout(() => {{
+                    isScrolling = false;
+                }}, SCROLL_DEBOUNCE);
+            }}
+
+            // Attach scroll listeners
+            const sessionList = document.getElementById('session-list');
+            if (sessionList) sessionList.addEventListener('scroll', handleScroll);
+            window.addEventListener('scroll', handleScroll);
+
             function isUserInteracting() {{
+                // Check if user is scrolling
+                if (isScrolling) {{
+                    return true;
+                }}
                 // Check if new session form is visible
                 const newSessionForm = document.getElementById('new-session-form');
                 if (newSessionForm && newSessionForm.style.display !== 'none') {{
@@ -2454,12 +2732,19 @@ def render_dashboard(sessions: list, dark_mode: str | None, sort_by: str = "rece
                     return;
                 }}
 
+                // Save scroll position before refresh
+                const scrollTop = sessionList ? sessionList.scrollTop : 0;
+                const windowScrollY = window.scrollY;
+
                 try {{
                     const url = '/api/sessions-html?sort=' + encodeURIComponent(sortBy);
                     const response = await fetch(url);
                     if (response.ok) {{
                         const html = await response.text();
                         document.getElementById('session-list').innerHTML = html;
+                        // Restore scroll position after refresh
+                        if (sessionList) sessionList.scrollTop = scrollTop;
+                        window.scrollTo(0, windowScrollY);
                     }}
                 }} catch (e) {{
                     console.error('Failed to refresh session list:', e);
@@ -2901,13 +3186,58 @@ def render_dashboard_swimlanes(
             const REFRESH_INTERVAL = 5000;
             const sortBy = '{sort_by}';
 
-            async function refreshSwimLanes() {{
-                // Skip if modal is open
+            // Track scrolling state - pause refresh while scrolling
+            let isScrolling = false;
+            let scrollTimeout = null;
+            const SCROLL_DEBOUNCE = 1500; // Wait 1.5s after scrolling stops
+
+            function handleScroll() {{
+                isScrolling = true;
+                if (scrollTimeout) clearTimeout(scrollTimeout);
+                scrollTimeout = setTimeout(() => {{
+                    isScrolling = false;
+                }}, SCROLL_DEBOUNCE);
+            }}
+
+            // Attach scroll listeners to swim lanes container and individual lanes
+            const swimLanesContainer = document.querySelector('.swim-lanes-container');
+            if (swimLanesContainer) swimLanesContainer.addEventListener('scroll', handleScroll);
+            window.addEventListener('scroll', handleScroll);
+            // Also track scroll on individual session lists within lanes
+            document.querySelectorAll('.session-list').forEach(el => {{
+                el.addEventListener('scroll', handleScroll);
+            }});
+
+            function isUserInteracting() {{
+                // Check if user is scrolling
+                if (isScrolling) return true;
+                // Check if modal is open
                 const overlay = document.getElementById('new-session-overlay');
-                if (overlay.classList.contains('active')) {{
+                if (overlay && overlay.classList.contains('active')) return true;
+                // Check if any input/textarea has focus
+                const activeEl = document.activeElement;
+                if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA')) return true;
+                return false;
+            }}
+
+            async function refreshSwimLanes() {{
+                if (isUserInteracting()) {{
                     scheduleRefresh();
                     return;
                 }}
+
+                // Save scroll positions before refresh
+                const containerScrollLeft = swimLanesContainer ? swimLanesContainer.scrollLeft : 0;
+                const windowScrollY = window.scrollY;
+                // Save individual lane scroll positions
+                const laneScrolls = {{}};
+                document.querySelectorAll('.swim-lane').forEach(lane => {{
+                    const laneId = lane.dataset.machine || lane.querySelector('h3')?.textContent;
+                    const sessionList = lane.querySelector('.session-list');
+                    if (laneId && sessionList) {{
+                        laneScrolls[laneId] = sessionList.scrollTop;
+                    }}
+                }});
 
                 try {{
                     const url = '/api/swimlanes-html?sort=' + encodeURIComponent(sortBy);
@@ -2915,6 +3245,26 @@ def render_dashboard_swimlanes(
                     if (response.ok) {{
                         const html = await response.text();
                         document.getElementById('swim-lanes').innerHTML = html;
+
+                        // Restore scroll positions
+                        const newContainer = document.querySelector('.swim-lanes-container');
+                        if (newContainer) {{
+                            newContainer.scrollLeft = containerScrollLeft;
+                            // Re-attach scroll listener to new container
+                            newContainer.addEventListener('scroll', handleScroll);
+                        }}
+                        window.scrollTo(0, windowScrollY);
+
+                        // Restore lane scroll positions
+                        document.querySelectorAll('.swim-lane').forEach(lane => {{
+                            const laneId = lane.dataset.machine || lane.querySelector('h3')?.textContent;
+                            const sessionList = lane.querySelector('.session-list');
+                            if (laneId && sessionList && laneScrolls[laneId] !== undefined) {{
+                                sessionList.scrollTop = laneScrolls[laneId];
+                            }}
+                            // Re-attach scroll listener
+                            if (sessionList) sessionList.addEventListener('scroll', handleScroll);
+                        }});
                     }}
                 }} catch (e) {{
                     console.error('Failed to refresh swim lanes:', e);
@@ -3165,36 +3515,57 @@ def _render_federation_config_section(config: dict) -> str:
 
 def _render_quick_replies_config_section(config: dict) -> str:
     """Render the quick replies configuration section."""
-    quick_replies = config.get("quick_replies", DEFAULT_QUICK_REPLIES.copy())
+    quick_replies = config.get("quick_replies", {})
+    num_replies = len(quick_replies)
 
     # Build quick reply cards
     replies_html = ""
-    for name, message in quick_replies.items():
-        escaped_name = html.escape(name)
-        escaped_message = html.escape(message)
-        replies_html += f'''
-        <div class="config-card">
-            <div class="config-card-header">
-                <strong>{escaped_name}</strong>
-                <form method="POST" action="/config/quick-replies/delete" class="inline-form">
+    if num_replies == 0:
+        replies_html = '''
+        <p style="color: var(--text-secondary); font-style: italic; margin: 10px 0;">
+            No quick replies configured. Add one below to get started.
+        </p>
+        '''
+    else:
+        for name, message in quick_replies.items():
+            escaped_name = html.escape(name)
+            escaped_message = html.escape(message)
+            replies_html += f'''
+            <div class="config-card">
+                <div class="config-card-header">
+                    <strong>{escaped_name}</strong>
+                    <form method="POST" action="/config/quick-replies/delete" class="inline-form">
+                        <input type="hidden" name="name" value="{escaped_name}">
+                        <button type="submit" onclick="return confirm('Delete this quick reply?')"
+                            class="btn-icon btn-danger" title="Delete">🗑</button>
+                    </form>
+                </div>
+                <form method="POST" action="/config/quick-replies/edit" class="config-edit-form">
                     <input type="hidden" name="name" value="{escaped_name}">
-                    <button type="submit" onclick="return confirm('Delete this quick reply?')"
-                        class="btn-icon btn-danger" title="Delete">🗑</button>
+                    <label class="field-label">Message:</label>
+                    <textarea name="message" rows="2">{escaped_message}</textarea>
+                    <button type="submit" class="btn-primary btn-sm">Save</button>
                 </form>
             </div>
-            <form method="POST" action="/config/quick-replies/edit" class="config-edit-form">
-                <input type="hidden" name="name" value="{escaped_name}">
-                <label class="field-label">Message:</label>
-                <textarea name="message" rows="2">{escaped_message}</textarea>
-                <button type="submit" class="btn-primary btn-sm">Save</button>
-            </form>
-        </div>
-        '''
+            '''
+
+    # Status indicator
+    if num_replies > 0:
+        status_color = "var(--status-idle)"
+        plural = "ies" if num_replies != 1 else "y"
+        status_text = f"{num_replies} quick repl{plural}"
+    else:
+        status_color = "var(--text-secondary)"
+        status_text = "None configured"
 
     return f'''
     <div class="config-section">
         <div class="section-header" onclick="toggleSection('quick-replies-content')">
-            <h2>⚡ Quick Replies</h2>
+            <h2>⚡ Quick Replies
+                <span style="font-size:12px;color:{status_color};margin-left:8px;">
+                    ({status_text})
+                </span>
+            </h2>
             <span class="section-toggle" id="quick-replies-toggle">▼</span>
         </div>
         <div class="section-content" id="quick-replies-content">
@@ -3213,6 +3584,54 @@ def _render_quick_replies_config_section(config: dict) -> str:
                     <textarea name="message"
                         placeholder="Enter the message to send" required></textarea>
                     <button type="submit" class="btn-primary">Add Quick Reply</button>
+                </form>
+            </div>
+        </div>
+    </div>
+    '''
+
+
+def _render_agent_settings_section(config: dict) -> str:
+    """Render the agent settings configuration section."""
+    agent_timeout_minutes = config.get("agent_timeout_minutes", 15)
+    max_loop_iterations = config.get("max_loop_iterations", 50)
+
+    return f'''
+    <div class="config-section">
+        <div class="section-header" onclick="toggleSection('agent-settings-content')">
+            <h2>🤖 Agent Settings</h2>
+            <span class="section-toggle" id="agent-settings-toggle">▼</span>
+        </div>
+        <div class="section-content" id="agent-settings-content">
+            <p class="section-description">
+                Configure agent behavior, timeouts, and loop settings.
+            </p>
+
+            <div class="config-card">
+                <form method="POST" action="/config/agent-settings">
+                    <label class="field-label">Agent Timeout (minutes):</label>
+                    <input type="number" name="agent_timeout_minutes" value="{agent_timeout_minutes}"
+                           min="1" max="120" style="width:100%;padding:8px;
+                           border:1px solid var(--border-color);border-radius:4px;
+                           background:var(--bg-secondary);color:var(--text-primary);
+                           font-size:13px;margin-bottom:8px;">
+                    <p style="color:var(--text-secondary);font-size:0.85em;margin-bottom:12px;">
+                        If an agent hasn't responded for this long, the session is reset (default: 15).
+                    </p>
+
+                    <label class="field-label">Max Loop Iterations:</label>
+                    <input type="number" name="max_loop_iterations" value="{max_loop_iterations}"
+                           min="1" max="500" style="width:100%;padding:8px;
+                           border:1px solid var(--border-color);border-radius:4px;
+                           background:var(--bg-secondary);color:var(--text-primary);
+                           font-size:13px;margin-bottom:8px;">
+                    <p style="color:var(--text-secondary);font-size:0.85em;margin-bottom:12px;">
+                        Maximum number of loop iterations before automatically stopping (default: 50).
+                    </p>
+
+                    <button type="submit" class="btn-primary" style="margin-top:8px;">
+                        Save Settings
+                    </button>
                 </form>
             </div>
         </div>
@@ -3497,6 +3916,9 @@ def render_config_page(
         <!-- Quick Replies Section (expanded by default - fewer items) -->
         {_render_quick_replies_config_section(config)}
 
+        <!-- Agent Settings Section -->
+        {_render_agent_settings_section(config)}
+
         <!-- Loop Prompts Section (collapsed by default - many items) -->
         <div class="config-section">
             <div class="section-header" onclick="toggleSection('loop-prompts-content')">
@@ -3643,45 +4065,39 @@ def _get_quick_replies_styles() -> str:
 
 
 def _render_message_form(session) -> str:
-    """Render the message form with queue support and quick replies."""
+    """Render the message form - send when idle, enqueue when busy."""
     from augment_agent_dashboard.models import SessionStatus
 
     # Count queued messages
     queued_count = sum(1 for m in session.messages if m.role == "queued")
     queue_info = ""
     if queued_count > 0:
-        queue_info = f'<span class="queue-count">({queued_count} queued)</span>'
+        queue_info = f' <span class="queue-count">({queued_count} queued)</span>'
 
     sid = session.session_id
     quick_replies_html = _render_quick_replies_html(sid)
 
     if session.status == SessionStatus.ACTIVE:
+        # Agent is working - can only enqueue
         return f'''
             <div class="status-banner status-active">
-                ⏳ Agent working. Messages queued. {queue_info}
+                ⏳ Agent working{queue_info}
             </div>
             {quick_replies_html}
             <form method="POST" action="/session/{sid}/queue">
                 <textarea id="message-input" name="message"
-                    placeholder="Type a message to queue..."></textarea>
-                <button type="submit" class="btn-queue">🕐 Enqueue Message</button>
+                    placeholder="Type a message..."></textarea>
+                <button type="submit" class="btn-queue">🕐 Enqueue</button>
             </form>
         '''
     else:
-        queue_action = f"/session/{sid}/queue"
+        # Agent is idle - can send directly
         return f'''
-            <p style="color: var(--text-secondary); margin-bottom: 10px;">
-                Send a message directly, or queue it for later. {queue_info}
-            </p>
             {quick_replies_html}
             <form method="POST" action="/session/{sid}/message" class="message-form">
                 <textarea id="message-input" name="message"
-                    placeholder="Type a message for the agent..."></textarea>
-                <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                    <button type="submit">▶ Send Now</button>
-                    <button type="submit" formaction="{queue_action}"
-                        class="btn-queue">🕐 Enqueue</button>
-                </div>
+                    placeholder="Type a message..."></textarea>
+                <button type="submit">▶ Send</button>
             </form>
         '''
 
@@ -3983,6 +4399,10 @@ def render_session_detail(
                 if (textarea) {{
                     textarea.value = message;
                     textarea.focus();
+                    // Also save to cache
+                    if (typeof saveMessageToCache === 'function') {{
+                        saveMessageToCache();
+                    }}
                 }}
             }}
 
@@ -4091,6 +4511,10 @@ def render_session_detail(
                         const formContent = document.getElementById('message-form-content');
                         if (formContent) {{
                             formContent.innerHTML = data.message_form_html;
+                            // Re-setup textarea caching after form replacement
+                            if (typeof setupTextareaCache === 'function') {{
+                                setupTextareaCache();
+                            }}
                         }}
                     }}
                 }} catch (e) {{
@@ -4124,20 +4548,74 @@ def render_session_detail(
 
                     e.preventDefault();
 
-                    // Check if there's a "Send Now" button (session is IDLE)
-                    const sendBtn = form.querySelector('button[type="submit"]:not(.btn-queue)');
-                    if (sendBtn) {{
-                        // Session is idle - submit via send button
-                        form.submit();
-                    }} else {{
-                        // Session is active or only queue available - submit to queue
-                        const queueBtn = form.querySelector('.btn-queue');
-                        if (queueBtn) {{
-                            form.submit();
-                        }}
+                    // Find the first submit button in the form (whatever it is)
+                    const firstBtn = form.querySelector('button[type="submit"]');
+                    if (firstBtn) {{
+                        // Clear the cache since we're submitting
+                        clearMessageCache();
+                        // Click the button to ensure formaction is used if present
+                        firstBtn.click();
                     }}
                 }}
             }});
+
+            // localStorage caching for message input
+            const MESSAGE_CACHE_KEY = 'augment_dashboard_message_' + sessionId;
+            let cacheSaveTimeout;
+
+            function saveMessageToCache() {{
+                const textarea = document.getElementById('message-input');
+                if (textarea) {{
+                    const value = textarea.value;
+                    if (value.trim()) {{
+                        localStorage.setItem(MESSAGE_CACHE_KEY, value);
+                    }} else {{
+                        localStorage.removeItem(MESSAGE_CACHE_KEY);
+                    }}
+                }}
+            }}
+
+            function loadMessageFromCache() {{
+                const textarea = document.getElementById('message-input');
+                if (textarea) {{
+                    const cached = localStorage.getItem(MESSAGE_CACHE_KEY);
+                    if (cached && !textarea.value.trim()) {{
+                        textarea.value = cached;
+                    }}
+                }}
+            }}
+
+            function clearMessageCache() {{
+                localStorage.removeItem(MESSAGE_CACHE_KEY);
+            }}
+
+            // Set up caching on textarea - called on load and after AJAX form updates
+            function setupTextareaCache() {{
+                const textarea = document.getElementById('message-input');
+                if (textarea && !textarea.dataset.cacheSetup) {{
+                    // Mark as set up to avoid duplicate listeners
+                    textarea.dataset.cacheSetup = 'true';
+
+                    // Load cached message
+                    loadMessageFromCache();
+
+                    // Save on input (debounced)
+                    textarea.addEventListener('input', function() {{
+                        clearTimeout(cacheSaveTimeout);
+                        cacheSaveTimeout = setTimeout(saveMessageToCache, 300);
+                    }});
+
+                    // Clear cache when form is submitted
+                    const form = textarea.closest('form');
+                    if (form && !form.dataset.cacheSetup) {{
+                        form.dataset.cacheSetup = 'true';
+                        form.addEventListener('submit', clearMessageCache);
+                    }}
+                }}
+            }}
+
+            // Initial setup
+            setupTextareaCache();
         </script>
     </body>
     </html>
@@ -4265,6 +4743,14 @@ def render_remote_session_detail(
             </div>
             <strong>Workspace:</strong> {workspace_root}<br>
             <strong>Remote Session ID:</strong> {remote_session_id}
+            <div class="loop-controls" style="margin-top:8px;">
+                <form method="POST" action="/api/remote/session/{federated_session_id}/delete">
+                    <button type="submit" class="btn-delete"
+                        onclick="return confirm('Delete this remote session?')">
+                        🗑 Delete Session
+                    </button>
+                </form>
+            </div>
         </div>
 
         <h2>Conversation</h2>
@@ -4303,6 +4789,78 @@ def render_remote_session_detail(
             if (messageList) {{
                 messageList.scrollTop = messageList.scrollHeight;
             }}
+
+            // localStorage caching for message input (remote session)
+            const remoteSessionId = '{federated_session_id}';
+            const MESSAGE_CACHE_KEY = 'augment_dashboard_message_' + remoteSessionId;
+
+            function saveMessageToCache() {{
+                const textarea = document.getElementById('message-input');
+                if (textarea) {{
+                    const value = textarea.value;
+                    if (value.trim()) {{
+                        localStorage.setItem(MESSAGE_CACHE_KEY, value);
+                    }} else {{
+                        localStorage.removeItem(MESSAGE_CACHE_KEY);
+                    }}
+                }}
+            }}
+
+            function loadMessageFromCache() {{
+                const textarea = document.getElementById('message-input');
+                if (textarea) {{
+                    const cached = localStorage.getItem(MESSAGE_CACHE_KEY);
+                    if (cached && !textarea.value.trim()) {{
+                        textarea.value = cached;
+                    }}
+                }}
+            }}
+
+            function clearMessageCache() {{
+                localStorage.removeItem(MESSAGE_CACHE_KEY);
+            }}
+
+            // Set up caching on textarea
+            (function() {{
+                const textarea = document.getElementById('message-input');
+                if (textarea) {{
+                    // Load cached message on page load
+                    loadMessageFromCache();
+
+                    // Save on input (debounced)
+                    let saveTimeout;
+                    textarea.addEventListener('input', function() {{
+                        clearTimeout(saveTimeout);
+                        saveTimeout = setTimeout(saveMessageToCache, 300);
+                    }});
+
+                    // Clear cache when form is submitted
+                    const form = textarea.closest('form');
+                    if (form) {{
+                        form.addEventListener('submit', clearMessageCache);
+                    }}
+                }}
+            }})();
+
+            // Cmd+Enter (Mac) or Ctrl+Enter (Windows/Linux) to send message
+            document.addEventListener('keydown', function(e) {{
+                if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {{
+                    const textarea = document.getElementById('message-input');
+                    if (!textarea || !textarea.value.trim()) return;
+
+                    const form = textarea.closest('form');
+                    if (!form) return;
+
+                    e.preventDefault();
+
+                    // Find the first submit button
+                    const firstBtn = form.querySelector('button[type="submit"]');
+                    if (firstBtn) {{
+                        clearMessageCache();
+                        firstBtn.click();
+                    }}
+                }}
+            }});
         </script>
     </body>
     </html>
@@ -4396,17 +4954,21 @@ def save_config(
     loop_prompts: dict[str, dict[str, str]],
     max_loop_iterations: int,
 ) -> None:
-    """Save dashboard config for hooks to read."""
-    import json
-    config_dir = Path.home() / ".augment" / "dashboard"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    config_path = config_dir / "config.json"
-    config_path.write_text(json.dumps({
-        "port": port,
-        "notification_sound": notification_sound,
-        "loop_prompts": loop_prompts,
-        "max_loop_iterations": max_loop_iterations,
-    }))
+    """Save dashboard config for hooks to read.
+
+    Merges with existing config to preserve other settings like federation,
+    memory, quick_replies, and recent_directories.
+    """
+    # Load existing config to preserve other settings
+    config = _get_full_config()
+
+    # Update only the startup-related fields
+    config["port"] = port
+    config["notification_sound"] = notification_sound
+    config["loop_prompts"] = loop_prompts
+    config["max_loop_iterations"] = max_loop_iterations
+
+    _save_full_config(config)
 
 
 def main():
@@ -4434,6 +4996,10 @@ def main():
         "--max-loop-iterations", type=int, default=50,
         help="Maximum number of loop iterations (default: 50)"
     )
+    parser.add_argument(
+        "--reload", action="store_true",
+        help="Enable auto-reload on file changes (for development)"
+    )
     args = parser.parse_args()
 
     # Determine sound setting
@@ -4445,7 +5011,17 @@ def main():
     # Save config for hooks
     save_config(args.port, notification_sound, loop_prompts, args.max_loop_iterations)
 
-    uvicorn.run(app, host="0.0.0.0", port=args.port)
+    if args.reload:
+        # For reload mode, uvicorn needs the app as a string import path
+        uvicorn.run(
+            "augment_agent_dashboard.server:app",
+            host="0.0.0.0",
+            port=args.port,
+            reload=True,
+            reload_dirs=["src/augment_agent_dashboard"],
+        )
+    else:
+        uvicorn.run(app, host="0.0.0.0", port=args.port)
 
 
 if __name__ == "__main__":

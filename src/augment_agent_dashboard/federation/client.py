@@ -242,3 +242,29 @@ class RemoteDashboardClient:
             logger.warning(f"Failed to create session on {self.remote.name}: {e}")
             return None
 
+    async def delete_session(self, remote_session_id: str) -> bool:
+        """Delete a session on the remote dashboard.
+
+        Args:
+            remote_session_id: The session ID on the remote machine.
+
+        Returns:
+            True if successful, False otherwise.
+        """
+        url = f"{self.base_url}/api/federation/sessions/{remote_session_id}"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.delete(url, headers=self._get_headers())
+                if response.status_code == 200:
+                    return True
+                else:
+                    logger.warning(
+                        f"Delete session failed on {self.remote.name}: "
+                        f"status={response.status_code}, url={url}, "
+                        f"response={response.text[:200] if response.text else 'empty'}"
+                    )
+                    return False
+        except Exception as e:
+            logger.warning(f"Failed to delete session on {self.remote.name}: {e}, url={url}")
+            return False
+

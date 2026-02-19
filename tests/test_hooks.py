@@ -462,7 +462,9 @@ class TestSendNotification:
 
     @patch("augment_agent_dashboard.hooks.stop.send_browser_notification")
     @patch("shutil.which")
-    def test_send_notification_no_terminal_notifier(self, mock_which, mock_browser, capsys):
+    def test_send_notification_no_terminal_notifier(self, mock_which, mock_browser, capsys, monkeypatch):
+        # Remove PYTEST_CURRENT_TEST so notification code runs
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
         mock_which.return_value = None
         stop.send_notification("Title", "Message", "workspace", "sess-1")
         mock_browser.assert_called_once()
@@ -472,7 +474,8 @@ class TestSendNotification:
     @patch("augment_agent_dashboard.hooks.stop.send_browser_notification")
     @patch("subprocess.run")
     @patch("shutil.which")
-    def test_send_notification_with_terminal_notifier(self, mock_which, mock_run, mock_browser):
+    def test_send_notification_with_terminal_notifier(self, mock_which, mock_run, mock_browser, monkeypatch):
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
         mock_which.return_value = "/usr/local/bin/terminal-notifier"
         mock_run.return_value = MagicMock(returncode=0)
         stop.send_notification("Title", "Message", "workspace", "sess-1", sound=True)
@@ -482,30 +485,45 @@ class TestSendNotification:
     @patch("augment_agent_dashboard.hooks.stop.send_browser_notification")
     @patch("subprocess.run")
     @patch("shutil.which")
-    def test_send_notification_exception(self, mock_which, mock_run, mock_browser, capsys):
+    def test_send_notification_exception(self, mock_which, mock_run, mock_browser, capsys, monkeypatch):
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
         mock_which.return_value = "/usr/local/bin/terminal-notifier"
         mock_run.side_effect = Exception("Test error")
         stop.send_notification("Title", "Message", "workspace", "sess-1")
         captured = capsys.readouterr()
         assert "Notification error" in captured.err
 
+    def test_send_notification_disabled_in_test_mode(self, monkeypatch):
+        """Test that notifications are skipped when PYTEST_CURRENT_TEST is set."""
+        # PYTEST_CURRENT_TEST is already set during pytest runs
+        # send_notification should return early without doing anything
+        # This test just verifies it doesn't raise
+        stop.send_notification("Title", "Message", "workspace", "sess-1")
+
 
 class TestSendBrowserNotification:
     """Tests for send_browser_notification function."""
 
     @patch("urllib.request.urlopen")
-    def test_send_browser_notification_success(self, mock_urlopen):
+    def test_send_browser_notification_success(self, mock_urlopen, monkeypatch):
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
         mock_urlopen.return_value.__enter__ = MagicMock()
         mock_urlopen.return_value.__exit__ = MagicMock()
         stop.send_browser_notification("Title", "Body", "http://url", 9000)
         mock_urlopen.assert_called_once()
 
     @patch("urllib.request.urlopen")
-    def test_send_browser_notification_error(self, mock_urlopen, capsys):
+    def test_send_browser_notification_error(self, mock_urlopen, capsys, monkeypatch):
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
         mock_urlopen.side_effect = Exception("Connection error")
         stop.send_browser_notification("Title", "Body", "http://url", 9000)
         captured = capsys.readouterr()
         assert "Browser notification error" in captured.err
+
+    def test_send_browser_notification_disabled_in_test_mode(self, monkeypatch):
+        """Test that browser notifications are skipped when PYTEST_CURRENT_TEST is set."""
+        # send_browser_notification should return early without doing anything
+        stop.send_browser_notification("Title", "Body", "http://url", 9000)
 
 
 class TestSpawnLoopMessage:

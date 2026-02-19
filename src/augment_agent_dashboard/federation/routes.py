@@ -179,3 +179,16 @@ async def create_session(
 
     return {"status": "ok", "message": "Session creation started"}
 
+
+@router.delete("/sessions/{session_id}")
+async def delete_session(
+    session_id: str,
+    _authorized: bool = Depends(verify_api_key),
+    store: SessionStore = Depends(get_store),
+):
+    """Delete a session from this machine (from a remote dashboard)."""
+    if not store.delete_session(session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    return {"status": "ok", "message": "Session deleted"}
+
